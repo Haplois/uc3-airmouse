@@ -41,7 +41,11 @@ void AirMouseBridge::command(const QVariantMap &value) {
             emit failed(tr("Invalid mouse button edge")); return;
         }
     }
-    if (busy() && !stop && !edge) { emit failed(tr("Still working on the previous action")); return; }
+    if (!stop && !edge) {
+        for (const auto &pending : m_pending) {
+            if (pending != "button") { emit failed(tr("Still working on the previous action")); return; }
+        }
+    }
     if (stop) m_pending.clear();
     if (m_pending.size() >= 32) {
         m_socket.abort(); emit failed(tr("Too many pending mouse button edges")); return;

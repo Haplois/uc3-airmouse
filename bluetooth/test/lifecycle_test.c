@@ -96,7 +96,7 @@ static uint8_t capture(hci_con_handle_t connection, const uint8_t *report, uint1
     last_report_size = length; notifications++; return 0;
 }
 uint8_t fake_send_report(hci_con_handle_t connection, uint16_t id, const uint8_t *report, uint16_t length) {
-    assert((id == 1 && length == 6) || (id == 2 && length == 2)); return capture(connection, report, length);
+    assert((id == 1 && length == 6) || (id == 2 && length == 2) || (id == 3 && length == 1)); return capture(connection, report, length);
 }
 uint8_t fake_send_boot(hci_con_handle_t connection, const uint8_t *report, uint16_t length) {
     assert(length == 3); return capture(connection, report, length);
@@ -131,6 +131,7 @@ static void request(const char *text) {
 static void reset(void) {
     hid_reset(&input);
     consumer_subscribed=false; sent_consumer=0; consumer_sent_at=0;
+    keyboard_subscribed=false; sent_key=0; key_sent_at=0;
     fast_advertising=false; advertising_started=switch_started=switching_host=0; db_mask=15; clock_ms = 100; link_encrypted = true; synchronous_send = false;
     disconnects = requests = notifications = hids_resets = 0;
     memset(last_report, 0xff, sizeof(last_report)); last_report_size = 0;
@@ -496,6 +497,61 @@ static void test_media_encryption_loss_disconnects(void) {
     request("MEDIA 1 205"); send_event();
     link_encrypted=false; stop_input(0); assert(disconnects==1);
 }
+static void test_keyboard_reports_and_stop_release(void) {
+    ready_connection(); keyboard_subscribed=true;
+    request("KEY 1 82");
+    assert(!input.active && input.count==2);
+    send_event(); assert(sent_key==82 && last_report_size==1 && last_report[0]==82);
+    uint8_t snapshot=0; report_snapshot(1,HID_REPORT_TYPE_INPUT,3,1,&snapshot); assert(snapshot==82);
+    btstack_hid_parser_t parser;
+    btstack_hid_parser_init(&parser,descriptor,sizeof(descriptor),HID_REPORT_TYPE_INPUT,(uint8_t[]){3,82},2);
+    assert(btstack_hid_parser_has_more(&parser));
+    uint16_t page,usage; int32_t value;
+    btstack_hid_parser_get_field(&parser,&page,&usage,&value);
+    assert(page==7 && usage==82 && value==1);
+    request("STOP 2"); send_event(); send_event();
+    assert(!sent_key && !stop_pending && ready());
+    request("KEY 3 79"); send_event(); send_event();
+    assert(!sent_key && !input.count && last_report[0]==0);
+    keyboard_subscribed=false; request("KEY 4 82"); assert(!input.count && ready());
+}
+static void test_keyboard_release_on_timeout_and_encryption_loss(void) {
+    ready_connection(); keyboard_subscribed=true;
+    request("KEY 1 80"); send_event();
+    clock_ms+=RELEASE_MS; btstack_timer_source_t timer; tick_event(&timer);
+    assert(stop_pending); send_event(); send_event(); assert(!sent_key && !stop_pending);
+    request("KEY 2 81"); send_event();
+    link_encrypted=false; stop_input(0); assert(disconnects==1);
+}
+static void test_keyboard_subscription_and_disconnect_reset(void) {
+    ready_connection();
+    uint8_t packet[]={HCI_EVENT_HIDS_META,5,HIDS_SUBEVENT_INPUT_REPORT_ENABLE,1,0,3,1};
+    radio_event(HCI_EVENT_PACKET,0,packet,sizeof(packet));
+    assert(keyboard_subscribed && ready());
+    request("KEY 1 82"); send_event();
+    packet[6]=0; radio_event(HCI_EVENT_PACKET,0,packet,sizeof(packet));
+    assert(!keyboard_subscribed && disconnects==1);
+    disconnection_event(); assert(!sent_key && !keyboard_subscribed && !input.count);
+}
+static void test_stop_releases_mouse_media_and_keyboard(void) {
+    ready_connection(); keyboard_subscribed=consumer_subscribed=true;
+    request("OPEN 1"); request("BUTTON 2 1"); send_event();
+    request("MEDIA 3 205"); send_event();
+    request("KEY 4 82"); send_event(); send_event();
+    assert(sent_key==82 && sent_buttons==1);
+    sent_consumer=205;
+    request("STOP 5"); assert(input.count==3);
+    send_event(); send_event(); send_event();
+    assert(!sent_key && !sent_consumer && !sent_buttons && !stop_pending);
+}
+static void test_disconnect_preserves_pairing_and_stops_advertising(void) {
+    ready_connection(); request("DISCONNECT 1");
+    assert(hosts.selected_id==0 && hosts.count==2 && disconnects==1 && !advertising_enabled && !ready());
+    host_registry saved; assert(hosts_load(&saved,registry_path)==1);
+    assert(saved.selected_id==0 && saved.count==2);
+    disconnection_event(); request("SELECT 2 00000001");
+    assert(hosts.selected_id==1 && advertising_enabled);
+}
 int main(void) {
     unsetenv("NOTIFY_SOCKET");
     char directory[]="/tmp/airmouse-lifecycle-test-XXXXXX";
@@ -504,6 +560,11 @@ int main(void) {
     test_unsubscribe_releases_by_disconnect();
     test_media_while_paused_and_stop_release();
     test_media_encryption_loss_disconnects();
+    test_keyboard_reports_and_stop_release();
+    test_keyboard_release_on_timeout_and_encryption_loss();
+    test_keyboard_subscription_and_disconnect_reset();
+    test_stop_releases_mouse_media_and_keyboard();
+    test_disconnect_preserves_pairing_and_stops_advertising();
     test_inactive_cccd_does_not_change_readiness();
     test_reconnect_resets_protocol_and_sends_zero_first();
     test_repeated_stop_keeps_original_deadline();
@@ -523,6 +584,6 @@ int main(void) {
     test_legacy_migration_and_forgotten_bond_cleanup();
     assert(unlink(registry_path)==0);
     assert(rmdir(directory)==0);
-    puts("Eighteen Bluetooth lifecycle regression tests passed");
+    puts("Bluetooth lifecycle regression tests passed");
     return 0;
 }

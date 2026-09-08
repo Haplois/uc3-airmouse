@@ -81,6 +81,27 @@ test('native output policy persists atomically on write failure', async t => {
   await assert.rejects(controller.apply({type:'output_policy',rate:1000}), /disk full/);
   assert.deepEqual(controller.config,before);assert.equal(controller.outputRate,80);
 });
+
+test('native button order defaults normally and persists through a controller restart', async t => {
+  const {controller,configFile,dir,sensor,output}=setup(t), c=await client(t,controller,dir);
+  delete controller.config.ui.swap_click_buttons;
+  assert.equal(controller.state().swap_click_buttons,false);
+  c.send({id:1,type:'swap_click_buttons',swapped:true}); assert.equal((await c.response(1)).ok,true);
+  assert.equal(controller.state().swap_click_buttons,true);
+  assert.equal(JSON.parse(fs.readFileSync(configFile)).ui.swap_click_buttons,true);
+  const restarted=new Controller({sensor,output,configFile}); t.after(()=>restarted.stop());
+  assert.equal(restarted.state().swap_click_buttons,true);
+  c.send({id:2,type:'swap_click_buttons',swapped:false}); assert.equal((await c.response(2)).ok,true);
+  assert.equal(controller.state().swap_click_buttons,false);
+  for (const command of [{id:3,type:'swap_click_buttons',swapped:'yes'},{id:4,type:'swap_click_buttons',swapped:true,extra:1}]) {
+    c.send(command); assert.equal((await c.response(command.id)).ok,false);
+  }
+  controller.pointer=true;
+  await assert.rejects(controller.apply({type:'swap_click_buttons',swapped:true}),/Pause pointing/);
+  controller.pointer=false; controller.save=()=>{throw new Error('disk full');};
+  await assert.rejects(controller.apply({type:'swap_click_buttons',swapped:true}),/disk full/);
+  assert.equal(controller.state().swap_click_buttons,false);
+});
 test('failed native calibration never reports completion', async t => {
   const {controller,sensor,dir}=setup(t), c=await client(t,controller,dir);
   sensor.begin=()=>{throw new Error('Sensor unavailable');};
@@ -225,4 +246,45 @@ test('native home shortcut preserves intent, acknowledges before reconnect, and 
   assert.equal(controller.pointer,false);assert.equal(controller.switching,null);
   c.send({id:4,type:'target',target:'00000001',keep_pointer:'yes'});
   assert.equal((await c.response(4)).ok,false);
+});
+
+test('native arrows work while paused and reject unsupported keys or fields', async t => {
+  const {controller,output,dir}=managedSetup(t), calls=[], c=await client(t,controller,dir);
+  output.key=async (target,key)=>calls.push({target,key});
+  for (const [index,key] of ['up','down','left','right'].entries()) {
+    c.send({id:index+1,type:'key',key}); assert.equal((await c.response(index+1)).ok,true);
+  }
+  assert.deepEqual(calls,['up','down','left','right'].map(key=>({target:'00000001',key})));
+  assert.equal(controller.pointer,false);
+  for (const command of [{id:5,type:'key',key:'enter'},{id:6,type:'key',key:'up',down:true},{id:7,type:'disconnect',target:'00000001'}]) {
+    c.send(command); assert.equal((await c.response(command.id)).ok,false);
+  }
+  assert.equal(calls.length,4); assert.equal(controller.target,'00000001');
+});
+
+test('native disconnect stops input before clearing selection and preserves saved computers', async t => {
+  const {controller,output,dir}=managedSetup(t), c=await client(t,controller,dir);
+  let disconnected=false;
+  output.disconnectTarget=async()=>{
+    assert.equal(controller.pointer,false); assert.equal(output.buttons,0);
+    disconnected=true; output.selectedTarget='';
+  };
+  c.send({id:1,type:'on'}); assert.equal((await c.response(1)).ok,true);
+  c.send({id:2,type:'button',button:1,down:true}); assert.equal((await c.response(2)).ok,true);
+  c.send({id:3,type:'disconnect'}); assert.equal((await c.response(3)).ok,true);
+  assert.equal(disconnected,true); assert.equal(controller.target,'');
+  assert.equal(controller.state().pointer_enabled,false); assert.equal(output.targets.length,2);
+});
+
+test('disconnect supersedes a pending mouse release without reporting a false failure', async t => {
+  const {controller,output,dir}=managedSetup(t), c=await client(t,controller,dir);
+  output.disconnectTarget=async()=>{output.selectedTarget='';};
+  c.send({id:1,type:'on'}); assert.equal((await c.response(1)).ok,true);
+  let cancel;
+  output.button=()=>new Promise((resolve,reject)=>{cancel=reject;});
+  c.send({id:2,type:'button',button:1,down:false});
+  while (!cancel) await delay(1);
+  c.send({id:3,type:'disconnect'}); assert.equal((await c.response(3)).ok,true);
+  cancel(new Error('Bluetooth input invalidated by stop'));
+  assert.equal((await c.response(2)).ok,true);
 });

@@ -140,10 +140,12 @@ Each ASCII command ends with a newline and occupies at most 128 bytes.
 | `BUTTON id mask` | Set absolute button mask 0 to 3 |
 | `MOVE 0 dx dy` | Queue signed movement, bounded to ±32767 per axis |
 | `SCROLL id wheel` | Queue wheel movement, bounded to ±127 |
-| `STOP id` | Cancel pending input and release buttons |
+| `STOP id` | Cancel pending input and release mouse, media, and keyboard input |
 | `PAIR id` | Open pairing when fewer than four computers are saved |
 | `CANCEL_PAIR id` | Close pairing and restore selected-host advertising |
 | `SELECT id peer` | Select a saved computer and disconnect the previous link |
+| `DISCONNECT id` | Clear the selection and disconnect while retaining saved computers |
+| `KEY id usage` | Send one keyboard arrow press and release, even while pointing is paused |
 | `RENAME id peer hex` | Save UTF-8 name encoded as hex; `-` resets the custom name |
 | `REORDER id peers` | Save an exact comma-separated permutation of all peer IDs |
 | `FORGET id peer` | Remove a saved computer and its bond |
@@ -158,6 +160,14 @@ Management commands require pointing off and no pending release. Peer IDs are
 nonzero, eight-digit lowercase hexadecimal strings. Names contain at most 48
 UTF-8 bytes and no control characters. SELECT acknowledges accepted selection,
 not a completed Bluetooth connection.
+
+KEY accepts the arrow usages `0x52`, `0x51`, `0x50`, and `0x4f` for up, down,
+left, and right. The wire format uses decimal integers. These values follow the
+[USB HID usage tables](https://www.usb.org/sites/default/files/hut1_21_0.pdf).
+Report ID 3 contains one byte from the keyboard usage page. A KEY acknowledgement
+follows the zero release report. Missing keyboard subscriptions reject KEY without
+changing mouse readiness. STOP and the 250 ms release deadline also cover keyboard
+input.
 
 Periodic version-2 state messages include the ordered `devices` array,
 `selected`, `connected_device`, and `host_limit`. They distinguish controller initialization,

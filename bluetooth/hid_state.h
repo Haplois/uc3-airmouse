@@ -10,6 +10,7 @@ typedef struct {
     uint8_t buttons;
     bool motion;
     bool consumer;
+    bool keyboard;
     uint16_t usage;
 } hid_report;
 
@@ -27,6 +28,7 @@ bool hid_button(hid_state *state, uint32_t id, uint8_t buttons, uint32_t now);
 bool hid_move(hid_state *state, int32_t dx, int32_t dy, uint32_t now);
 bool hid_scroll(hid_state *state, uint32_t id, int32_t wheel, uint32_t now);
 bool hid_media(hid_state *state, uint32_t id, uint16_t usage, uint32_t now);
+bool hid_key(hid_state *state, uint32_t id, uint8_t usage, uint32_t now);
 void hid_stop(hid_state *state, uint32_t id, uint32_t now);
 const hid_report *hid_peek(hid_state *state, uint32_t now);
 void hid_pop(hid_state *state);

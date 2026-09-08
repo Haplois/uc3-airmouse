@@ -42,7 +42,10 @@ Item {
             "VOLUME_DOWN": { pressed: function() { mousePage.media("volume_down"); }, pressed_repeat: function() { mousePage.media("volume_down"); } },
             "STOP": { pressed: function() { mousePage.media("stop"); }, pressed_repeat: function() {} },
             "DPAD_MIDDLE": { pressed: function() { mousePage.buttonPressed(1); }, released: function() { mousePage.buttonReleased(1); }, pressed_repeat: function() {} },
-            "DPAD_RIGHT": { pressed: function() { mousePage.buttonPressed(2); }, released: function() { mousePage.buttonReleased(2); }, pressed_repeat: function() {} }
+            "DPAD_UP": { pressed: function() { mousePage.direction("up"); }, pressed_repeat: function() { mousePage.direction("up"); } },
+            "DPAD_DOWN": { pressed: function() { mousePage.direction("down"); }, pressed_repeat: function() { mousePage.direction("down"); } },
+            "DPAD_LEFT": { pressed: function() { mousePage.direction("left"); }, pressed_repeat: function() { mousePage.direction("left"); } },
+            "DPAD_RIGHT": { pressed: function() { mousePage.direction("right"); }, pressed_repeat: function() { mousePage.direction("right"); } }
         })
     }
     Connections {

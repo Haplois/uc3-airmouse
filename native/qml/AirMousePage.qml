@@ -14,11 +14,13 @@ Rectangle {
     readonly property var palette: Palettes.get(viewState.theme)
     readonly property bool pointing: bridge.connected && !!viewState.pointer
     readonly property bool pointerEnabled: pointing || bridge.connected && viewState.pointer_enabled === true
+    readonly property bool swapClickButtons: viewState.swap_click_buttons === true
     property string screenPage: "mouse"
     property string notice: ""
     property bool touching: false
     property real wheelFraction: 0
     property int physicalButtons: 0
+    property int touchButtons: 0
     property int heldButtons: 0
     readonly property bool canPair: viewState.bluetooth_backend === "owned" && !viewState.paired
     signal exitRequested()
@@ -69,19 +71,27 @@ Rectangle {
         if (screenPage !== "mouse" || !bridge.connected || bridge.busy || !viewState.ready) return;
         send({type: "media", key: key});
     }
-    function buttonPressed(button) {
+    function direction(key) {
+        if (screenPage !== "mouse" || !bridge.connected || bridge.busy || !viewState.ready) return;
+        send({type: "key", key: key});
+    }
+    function buttonPressed(button, touchscreen) {
         if (button !== 1 && button !== 2) return;
-        if (physicalButtons & button) return;
-        physicalButtons |= button;
+        if ((touchscreen ? touchButtons : physicalButtons) & button) return;
+        if (touchscreen) touchButtons |= button;
+        else physicalButtons |= button;
         if (screenPage !== "mouse") return;
         if (!pointing) { notice = "Start pointing to click"; noticeTimer.restart(); return; }
         if (viewState.button_edges !== true) { click(button); return; }
+        if (heldButtons & button) return;
         heldButtons |= button;
         send({type: "button", button: button, down: true});
     }
-    function buttonReleased(button) {
+    function buttonReleased(button, touchscreen) {
         if (button !== 1 && button !== 2) return;
-        physicalButtons &= ~button;
+        if (touchscreen) touchButtons &= ~button;
+        else physicalButtons &= ~button;
+        if ((physicalButtons | touchButtons) & button) return;
         if (!(heldButtons & button)) return;
         heldButtons &= ~button;
         if (bridge.connected) send({type: "button", button: button, down: false});
@@ -89,6 +99,7 @@ Rectangle {
     function releaseButtons() {
         var held = heldButtons;
         physicalButtons = 0;
+        touchButtons = 0;
         heldButtons = 0;
         if (!bridge || !bridge.connected) return;
         for (var button = 1; button <= 2; button++) {
@@ -148,18 +159,26 @@ Rectangle {
             Column {
                 x: 20; y: 20; width: parent.width - 40; spacing: 0
                 Item {
-                    width: parent.width; height: 282
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter; width: 260; height: 154; radius: 19; border.color: page.palette.line
-                        gradient: Gradient { GradientStop { position: 0; color: page.palette.monitor } GradientStop { position: 1; color: page.palette.card } }
-                        Glyph { anchors.centerIn: parent; width: 60; height: 60; kind: page.pointerEnabled ? "pointer" : "pause"; ink: page.palette.accent }
+                    width: parent.width; height: 262
+                    Button {
+                        objectName: "monitorButton"
+                        anchors.horizontalCenter: parent.horizontalCenter; width: 260; height: 134
+                        enabled: page.pointerEnabled || page.bridge.connected && page.viewState.ready && !page.bridge.busy
+                        Accessible.name: page.pointerEnabled ? "Pause pointing" : "Start pointing"
+                        onClicked: page.toggle()
+                        background: Rectangle {
+                            radius: 19; border.color: parent.activeFocus ? page.palette.accent : page.palette.line
+                            opacity: parent.down ? 0.7 : 1
+                            gradient: Gradient { GradientStop { position: 0; color: page.palette.monitor } GradientStop { position: 1; color: page.palette.card } }
+                        }
+                        contentItem: Item { Glyph { anchors.centerIn: parent; width: 60; height: 60; kind: page.pointerEnabled ? "pointer" : "pause"; ink: page.palette.accent } }
                         Rectangle { anchors.top: parent.bottom; anchors.horizontalCenter: parent.horizontalCenter; width: 58; height: 13; color: "transparent"; border.color: page.palette.line }
                     }
-                    Text { textFormat: Text.PlainText; y: 180; width: parent.width; text: page.viewState.target_name || "Choose a computer"; color: page.palette.fg; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 36; elide: Text.ElideRight }
-                    Text { textFormat: Text.PlainText; y: 228; width: parent.width; text: page.statusText(); color: page.palette.muted; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 18; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
+                    Text { textFormat: Text.PlainText; y: 160; width: parent.width; text: page.viewState.target_name || "Choose a computer"; color: page.palette.fg; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 36; elide: Text.ElideRight }
+                    Text { textFormat: Text.PlainText; y: 208; width: parent.width; text: page.statusText(); color: page.palette.muted; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 18; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
                 }
                 Rectangle {
-                    width: parent.width; height: 350; radius: 25; color: page.palette.card; border.color: page.palette.line
+                    width: parent.width; height: 250; radius: 25; color: page.palette.card; border.color: page.palette.line
                     Text { textFormat: Text.PlainText; x: 20; y: 35; text: "QUICK SWITCH"; color: page.palette.muted; font.pixelSize: 14 }
                     ActionButton { objectName: "allDevicesButton"; anchors.right: parent.right; anchors.rightMargin: 20; y: 15; width: 158; height: 56; text: page.canPair && !page.viewState.device_management ? "Pair computer" : "All devices ›"; textSize: 16; tones: page.palette; enabled: page.bridge.connected && !page.bridge.busy; onClicked: page.canPair && !page.viewState.device_management ? page.send({type: "pair"}) : page.navigate("targets") }
                     Row {
@@ -183,15 +202,36 @@ Rectangle {
                                     Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: chosen ? "Selected" : modelData.ready ? "Ready" : "Offline"; font.pixelSize: 14; color: chosen ? page.palette.ink : page.palette.muted }
                                 }
                                 }
-                                onClicked: { page.endScroll(); page.send({type: "target", target: modelData.id, keep_pointer: true}); }
+                                onClicked: {
+                                    page.endScroll(); page.releaseButtons();
+                                    page.send(chosen ? {type: "disconnect"} : {type: "target", target: modelData.id, keep_pointer: true});
+                                }
                             }
                         }
                     }
                     Text { textFormat: Text.PlainText; visible: !(page.viewState.targets || []).length; x: 20; y: 120; width: parent.width - 40; text: page.canPair ? (page.viewState.device_management ? "No paired computers.\nOpen All devices to pair." : "No paired computer.\nTap Pair computer to connect.") : "No paired mouse targets.\nPair a computer in Bluetooth settings."; color: page.palette.muted; font.pixelSize: 19; horizontalAlignment: Text.AlignHCenter }
-                    ActionButton { objectName: "pointerButton"; x: 20; y: 248; width: parent.width - 40; height: 84; tones: page.palette; primary: true; textSize: 26; glyph: page.pointerEnabled ? "pause" : "pointer"; text: page.pointerEnabled ? "Pause pointing" : "Start pointing"; enabled: page.pointerEnabled || page.bridge.connected && page.viewState.ready && !page.bridge.busy; onClicked: page.toggle() }
                 }
             }
-
+            Row {
+                objectName: "mouseButtons"
+                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                anchors.bottomMargin: 0
+                height: 120; spacing: 0
+                Repeater {
+                    model: page.swapClickButtons ? [2, 1] : [1, 2]
+                    ActionButton {
+                        readonly property int mouseButton: modelData
+                        objectName: mouseButton === 1 ? "leftClickButton" : "rightClickButton"
+                        width: parent.width / 2; height: parent.height; cornerRadius: 0
+                        text: mouseButton === 1 ? "Left click" : "Right click"; textSize: 22; tones: page.palette
+                        background: Rectangle { color: page.palette.card; opacity: parent.down ? 0.7 : 1 }
+                        enabled: page.pointing
+                        onPressed: page.buttonPressed(mouseButton, true)
+                        onReleased: page.buttonReleased(mouseButton, true)
+                        onCanceled: page.buttonReleased(mouseButton, true)
+                    }
+                }
+            }
         }
     }
     Component {
@@ -210,6 +250,21 @@ Rectangle {
                         Text { textFormat: Text.PlainText; text: "Color theme"; color: page.palette.fg; font.pixelSize: 18; Layout.fillWidth: true }
                         Text { textFormat: Text.PlainText; text: page.palette.name; color: page.palette.muted; font.pixelSize: 18 }
                         Glyph { kind: "next"; ink: page.palette.fg; width: 24; height: 24 }
+                    }
+                }
+                Text { textFormat: Text.PlainText; text: "Click button order"; color: page.palette.fg; font.pixelSize: 17 }
+                Row {
+                    width: parent.width; spacing: 8
+                    Repeater {
+                        model: [false, true]
+                        ActionButton {
+                            objectName: modelData ? "buttonOrderSwapped" : "buttonOrderNormal"
+                            width: (parent.width - 8) / 2; height: 56; tones: page.palette
+                            text: modelData ? "Right · Left" : "Left · Right"
+                            primary: page.swapClickButtons === modelData
+                            enabled: page.bridge.connected && !page.bridge.busy && !page.pointing && !page.viewState.calibrating
+                            onClicked: if (!primary) page.send({type: "swap_click_buttons", swapped: modelData})
+                        }
                     }
                 }
                 Text { textFormat: Text.PlainText; text: "Pointer speed"; color: page.palette.fg; font.pixelSize: 17 }

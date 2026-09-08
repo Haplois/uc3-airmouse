@@ -66,6 +66,7 @@ export class Controller {
     const ownedBluetooth = this.output.backend === 'owned';
     return {
       theme: this.config.ui.theme ?? 'black',
+      swap_click_buttons: this.config.ui.swap_click_buttons === true,
       speed: Math.max(10, Math.min(100, Math.round((this.currentTuning().sensitivity ?? this.config.motion.filter.sensitivity) / 30))),
       sampling_policy: samplingPolicy(this.outputRate, this.rates),
       applied_sampling: this.pointer || this.calibrating ? this.rate : null,
@@ -162,11 +163,25 @@ export class Controller {
     if ((this.output.backend === 'owned' && command.type === 'pair') || (managed && command.type === 'forget')) {
       this.stop(command.type === 'pair' ? 'Pairing' : 'Forgetting device');
     }
+    if (command.type === 'disconnect') this.stop('Computer disconnected');
     const generation = this.generation;
     this.queued++;
     const task = this.queue.then(async () => {
       if (generation !== this.generation) throw new Error('Command invalidated by stop');
       switch (command.type) {
+        case 'disconnect': {
+          if (!managed || typeof this.output.disconnectTarget !== 'function') throw new Error('Disconnect requires Bluetooth device management');
+          await this.cleanup;
+          if (generation !== this.generation) return;
+          try { await this.output.disconnectTarget(); }
+          catch (error) { this.error = error.message; this.changed(); throw error; }
+          if (generation !== this.generation) return;
+          this.target = ''; this.error = ''; this.changed(); return;
+        }
+        case 'key': {
+          if (typeof this.output.key !== 'function') throw new Error('Arrow keys require the owned Bluetooth backend');
+          return this.output.key(this.target, command.key);
+        }
         case 'media': {
           if (typeof this.output.media !== 'function') throw new Error('Media controls require the owned Bluetooth backend');
           return this.output.media(this.target, command.key);
@@ -208,6 +223,12 @@ export class Controller {
           this.persist({ ...this.config, bluetooth: { ...this.config.bluetooth, ownership: command.mode } });
           this.takeoverAttempted = false;
           this.applyOwnership(); this.changed(); return;
+        }
+        case 'swap_click_buttons': {
+          if (typeof command.swapped !== 'boolean') throw new Error('Button order must be a boolean');
+          if (this.pointer || this.calibrating) throw new Error('Pause pointing before changing button order');
+          this.persist({ ...this.config, ui: { ...this.config.ui, swap_click_buttons: command.swapped } });
+          this.changed(); return;
         }
         case 'speed': {
           if (!Number.isInteger(command.speed) || command.speed < 10 || command.speed > 100) throw new Error('Speed must be 10–100');
@@ -322,6 +343,7 @@ export class Controller {
       await this.output.button(button, down, generation);
       if (this.pointer && generation === this.generation) this.touch();
     } catch (error) {
+      if (!down && generation !== this.generation) return;
       if (this.pointer && generation === this.generation) {
         this.error = error.message;
         await this.stop('Button output failed').catch(() => {});

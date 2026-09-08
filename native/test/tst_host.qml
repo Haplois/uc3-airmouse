@@ -81,15 +81,27 @@ TestCase {
         var field=findChild(manager,"computerRenameField"); verify(field.activeFocus);
         host.close(); compare(field.activeFocus,false); compare(manager.mode,"list");
     }
-    function test_ok_and_right_have_distinct_edges() {
+    function test_ok_remains_left_click() {
+        var state=JSON.parse(JSON.stringify(bridge.snapshot)); state.swap_click_buttons=true; bridge.snapshot=state;
         var config=navigation.defaultConfig;
         config.DPAD_MIDDLE.pressed(); config.DPAD_MIDDLE.pressed(); config.DPAD_MIDDLE.pressed_repeat();
-        config.DPAD_RIGHT.pressed(); config.DPAD_RIGHT.pressed_repeat();
-        config.DPAD_MIDDLE.released(); config.DPAD_RIGHT.released();
-        compare(bridge.commands,[
-            {type:"button",button:1,down:true},{type:"button",button:2,down:true},
-            {type:"button",button:1,down:false},{type:"button",button:2,down:false}
-        ]);
+        config.DPAD_MIDDLE.released();
+        compare(bridge.commands,[{type:"button",button:1,down:true},{type:"button",button:1,down:false}]);
+    }
+    function test_directions_send_arrow_keys_while_paused() {
+        bridge.busy=false;
+        bridge.snapshot=({theme:"black",pointer:false,ready:true,targets:[]});
+        var keys=["UP","DOWN","LEFT","RIGHT"];
+        for (var i=0;i<keys.length;i++) {
+            var binding=navigation.defaultConfig["DPAD_"+keys[i]];
+            binding.pressed(); binding.pressed_repeat();
+            compare(bridge.commands[i*2],{type:"key",key:keys[i].toLowerCase()});
+            compare(bridge.commands[i*2+1],bridge.commands[i*2]);
+        }
+        bridge.busy=true; navigation.defaultConfig.DPAD_UP.pressed();
+        bridge.busy=false; findChild(host,"airMousePage").screenPage="settings";
+        navigation.defaultConfig.DPAD_RIGHT.pressed();
+        compare(bridge.commands.length,8);
     }
     function test_home_cycles_quick_devices_without_closing() {
         bridge.busy=false;
@@ -106,12 +118,12 @@ TestCase {
         navigation.defaultConfig.HOME.pressed_repeat(); compare(bridge.commands.length,4);
     }
     function test_navigation_loss_releases_before_off() {
-        navigation.defaultConfig.DPAD_RIGHT.pressed();
+        navigation.defaultConfig.DPAD_MIDDLE.pressed();
         inputController.activeItem=null;
         wait(1);
-        compare(bridge.commands[1],{type:"button",button:2,down:false});
+        compare(bridge.commands[1],{type:"button",button:1,down:false});
         compare(bridge.commands[2],{type:"off"});
-        navigation.defaultConfig.DPAD_RIGHT.released(); compare(bridge.commands.length,3);
+        navigation.defaultConfig.DPAD_MIDDLE.released(); compare(bridge.commands.length,3);
     }
     function test_sleep_keeps_pointing_app_open_and_releases_buttons() {
         navigation.defaultConfig.DPAD_MIDDLE.pressed();
@@ -159,7 +171,8 @@ TestCase {
     function test_power_toggles_and_up_no_longer_toggles() {
         navigation.defaultConfig.POWER.pressed();
         compare(bridge.commands,[{type:"off"}]);
-        verify(!navigation.defaultConfig.DPAD_UP);
+        navigation.defaultConfig.DPAD_UP.pressed();
+        compare(bridge.commands,[{type:"off"}]);
     }
     function test_media_works_with_pointer_paused() {
         bridge.busy=false; bridge.snapshot=({theme:"black",pointer:false,ready:true,targets:[]});

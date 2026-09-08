@@ -89,6 +89,27 @@ class Daemon(unittest.TestCase):
         self.send(f'{command} {self.request}' + (f' {arguments}' if arguments else '') + '\n')
         return self.ack(self.request)
 
+    def test_arrow_keys_while_paused_are_press_then_release(self):
+        self.start()
+        for usage in [82,81,80,79]:
+            self.assertTrue(self.command('KEY',str(usage))['ok'])
+        keys=[int(line.split()[1]) for line in self.contents().splitlines() if line.startswith('TEST_KEY ')]
+        self.assertEqual(keys,[82,0,81,0,80,0,79,0])
+        self.assertFalse(self.command('KEY','78')['ok'])
+
+    def test_disconnect_preserves_devices_and_persists(self):
+        self.start(hosts=2)
+        self.assertTrue(self.command('DISCONNECT')['ok'])
+        state=self.state(lambda s: not s['selected'])
+        self.assertEqual(len(state['devices']),2)
+        self.assertTrue(state['paired'])
+        self.assertFalse(state['ready'])
+        self.assertFalse(self.command('KEY','82')['ok'])
+        self.restart(ready=False)
+        self.assertEqual(self.initial_message['state']['selected'],'')
+        self.assertTrue(self.command('SELECT','00000001')['ok'])
+        self.assertTrue(self.state(lambda s: s['selected']=='00000001')['ready'])
+
     def state(self, predicate=lambda state: True):
         deadline=time.monotonic()+2
         while time.monotonic()<deadline:

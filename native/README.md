@@ -92,8 +92,10 @@ unsupported and returns an error. The app's sensor and Bluetooth controls contin
 to use the existing Unix socket.
 
 After activation, open **Living room → Air mouse**. Check the selected computer,
-press **Power** to start pointing, and test **OK**, **Right**, and the bottom
-strip manually. Open Settings to change speed, output limit, calibration, or
+tap the monitor or press **Power** to start pointing. Test **OK** for left click,
+the bottom **Left click** and **Right click** buttons, all four arrow keys, and
+the bottom touch strip manually. Tap the selected quick-switch computer to
+disconnect, then tap it again to reconnect. Open Settings to change speed, output limit, calibration, or
 color.
 
 If upload returns a connection error, run `status` before retrying. The Core

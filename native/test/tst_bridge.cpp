@@ -140,6 +140,18 @@ private slots:
         bridge->close();
         QTRY_COMPARE(peer->state(),QLocalSocket::UnconnectedState);
     }
+    void disconnectFollowsMouseReleaseWithoutWaitingForItsReply() {
+        QSignalSpy failures(bridge.get(), &AirMouseBridge::failed);
+        bridge->command({{"type","button"},{"button",1},{"down",false}});
+        bridge->command({{"type","disconnect"}});
+        QTRY_COMPARE(requests.size(),2); QCOMPARE(failures.size(),0);
+        QCOMPARE(requests[0].value("type").toString(),QString("button"));
+        QCOMPARE(requests[1].value("type").toString(),QString("disconnect"));
+        bridge->command({{"type","target"},{"target","00000001"}});
+        QCOMPARE(failures.size(),1);
+        for (const auto &request : requests) reply({{"id",request.value("id")},{"ok",true}});
+        QTRY_VERIFY(!bridge->busy());
+    }
 };
 QTEST_GUILESS_MAIN(BridgeTest)
 #include "tst_bridge.moc"

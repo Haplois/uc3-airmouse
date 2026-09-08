@@ -354,6 +354,17 @@ export class HidOutput {
     requirePeer(id); this.requireManagedTarget(id);
     return this.request('SELECT', [id], { timeoutMs: this.metadataRequestTimeoutMs });
   }
+  disconnectTarget() {
+    if (!this.deviceManagement) return Promise.reject(new Error('Bluetooth device management is unavailable'));
+    return this.request('DISCONNECT', [], { timeoutMs: this.metadataRequestTimeoutMs });
+  }
+  key(id, key) {
+    const usages = { up: 0x52, down: 0x51, left: 0x50, right: 0x4f };
+    if (!Object.hasOwn(usages, key)) return Promise.reject(new Error('Unknown arrow key'));
+    if (!this.ready(id) || this.quiescing) return Promise.reject(new Error('Bluetooth host is unavailable'));
+    this.sessionMayBeActive = true;
+    return this.request('KEY', [usages[key]]);
+  }
 
   async rename(id, name) {
     requirePeer(id); this.requireManagedTarget(id);
@@ -398,7 +409,7 @@ export class HidOutput {
         if (!this.connected) { this.sessionMayBeActive = false; return; }
         const stopID = this.nextID;
         for (const [id, pending] of this.pendingRequests) {
-          if (id >= stopID || !['OPEN', 'BUTTON', 'SCROLL', 'MEDIA'].includes(pending.command)) continue;
+          if (id >= stopID || !['OPEN', 'BUTTON', 'SCROLL', 'MEDIA', 'KEY'].includes(pending.command)) continue;
           clearTimeout(pending.timer); this.pendingRequests.delete(id);
           while (this.ignoredResponses.size >= 32) this.ignoredResponses.delete(this.ignoredResponses.values().next().value);
           this.ignoredResponses.add(id);

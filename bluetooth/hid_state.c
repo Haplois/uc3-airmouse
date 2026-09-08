@@ -62,6 +62,12 @@ bool hid_media(hid_state *state, uint32_t id, uint16_t usage, uint32_t now) {
 void hid_pop(hid_state *state) {
     if (state->count) { state->head = (state->head + 1) % HID_QUEUE_SIZE; state->count--; }
 }
+bool hid_key(hid_state *state, uint32_t id, uint8_t usage, uint32_t now) {
+    if (usage < 0x4f || usage > 0x52 || state->count > HID_QUEUE_SIZE - 2) return false;
+    *append(state) = (hid_report){ .time=now, .keyboard=true, .usage=usage };
+    *append(state) = (hid_report){ .id=id, .time=now, .keyboard=true };
+    return true;
+}
 const hid_report *hid_peek(hid_state *state, uint32_t now) {
     while (state->count) {
         const hid_report *report = &state->queue[state->head];

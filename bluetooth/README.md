@@ -84,6 +84,12 @@ BTstack's normal invalidation behavior. Keep released layout files unchanged.
 Changes to the dynamic HID report descriptor also require compatibility review;
 the GATT layout comparison cannot check that descriptor.
 
+Arrow keys use a keyboard input report with ID 3 appended after the mouse and
+media reports. Existing mouse and media attributes retain their handles. A host
+that caches the old report map might need to reconnect or pair again before it
+subscribes to keyboard reports. Mouse readiness does not require a keyboard
+subscription. Verify arrow input on the paired computer after updating.
+
 For subscriptions already erased by the mouse-v1 to media-v2 update, use an
 on-device backup. Recovery copies missing subscriptions only when the entire
 saved bond matches. It preserves existing subscriptions, bond keys, file

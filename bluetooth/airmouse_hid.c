@@ -41,7 +41,10 @@ static const uint8_t descriptor[] = {
     0x09,0x38,0x15,0x81,0x25,0x7f,0x75,0x08,0x95,0x01,0x81,0x06,0xc0,0xc0,
     0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x02,
     0x15,0x00,0x26,0xff,0x03,0x19,0x00,0x2a,0xff,0x03,
-    0x75,0x10,0x95,0x01,0x81,0x00,0xc0
+    0x75,0x10,0x95,0x01,0x81,0x00,0xc0,
+    0x05,0x01,0x09,0x06,0xa1,0x01,0x85,0x03,
+    0x05,0x07,0x15,0x00,0x25,0x52,0x19,0x00,0x29,0x52,
+    0x75,0x08,0x95,0x01,0x81,0x00,0xc0
 };
 static uint8_t advertising[] = {
     2,BLUETOOTH_DATA_TYPE_FLAGS,6,
@@ -73,6 +76,9 @@ static bool stop_pending, report_subscribed, boot_subscribed;
 static bool consumer_subscribed;
 static uint16_t sent_consumer;
 static uint32_t consumer_sent_at;
+static bool keyboard_subscribed;
+static uint8_t sent_key;
+static uint32_t key_sent_at;
 static uint8_t protocol_mode = 1, sent_buttons;
 static uint32_t highest_id, last_seen, stop_time, pairing_until, connected_at, started_at, last_status;
 static uint16_t interval_units;
@@ -178,12 +184,15 @@ static void stop_input(uint32_t id) {
     if (!stop_pending) stop_time=now_ms();
     hid_stop(&input,id,now_ms()); stop_pending=true;
     if (sent_consumer) {
-        input.queue[0].id=0;
-        input.queue[1]=(hid_report){ .id=id, .time=now_ms(), .consumer=true };
-        input.count=2;
+        input.queue[input.count-1].id=0;
+        input.queue[input.count++]=(hid_report){ .id=id, .time=now_ms(), .consumer=true };
+    }
+    if (sent_key) {
+        input.queue[input.count-1].id=0;
+        input.queue[input.count++]=(hid_report){ .id=id, .time=now_ms(), .keyboard=true };
     }
     if (!available()) {
-        if ((sent_buttons || sent_consumer) && handle!=HCI_CON_HANDLE_INVALID) {
+        if ((sent_buttons || sent_consumer || sent_key) && handle!=HCI_CON_HANDLE_INVALID) {
             error_text="Release unavailable; Bluetooth disconnected";
             disconnect_host(); reply(id,error_text);
         } else { hid_reset(&input); stop_pending=false; reply(id,NULL); }
@@ -200,10 +209,11 @@ static void accepted_report(const hid_report *report) {
     bool state_changed=!initialized || sent_buttons!=report->buttons;
     uint32_t id=report->id;
     if (report->consumer) { sent_consumer=report->usage; consumer_sent_at=now_ms(); }
+    else if (report->keyboard) { sent_key=(uint8_t)report->usage; key_sent_at=now_ms(); }
     else sent_buttons=report->buttons;
     reports_sent++;
     hid_pop(&input);
-    if (!input.active && !sent_buttons && !sent_consumer && input.count==0) { initialized=true; stop_pending=false; }
+    if (!input.active && !sent_buttons && !sent_consumer && !sent_key && input.count==0) { initialized=true; stop_pending=false; }
     reply(id,NULL);
     if(state_changed) send_status();
     if(initialized) {
@@ -226,6 +236,11 @@ static void send_one(void) {
         if (simulation) { printf("TEST_MEDIA %u\n",report->usage); fflush(stdout); result=0; }
         else if (!consumer_subscribed || protocol_mode==0) result=ERROR_CODE_COMMAND_DISALLOWED;
         else result=hids_device_send_input_report_for_id(handle,2,consumer_data,sizeof(consumer_data));
+    } else if (report->keyboard) {
+        uint8_t key_data=(uint8_t)report->usage;
+        if (simulation) { printf("TEST_KEY %u\n",report->usage); fflush(stdout); result=0; }
+        else if (!keyboard_subscribed || protocol_mode==0) result=ERROR_CODE_COMMAND_DISALLOWED;
+        else result=hids_device_send_input_report_for_id(handle,3,&key_data,sizeof(key_data));
     } else if (simulation) {
         printf("TEST_REPORT %u %"PRId32" %"PRId32" %"PRId32"\n",report->buttons,report->dx,report->dy,report->wheel); fflush(stdout); result=0;
     } else if (protocol_mode==0) {
@@ -313,11 +328,15 @@ static bool management(char **tokens,unsigned count,uint32_t id) {
     bool select=!strcmp(tokens[0],"SELECT"),forget=!strcmp(tokens[0],"FORGET");
     bool rename=!strcmp(tokens[0],"RENAME"),reorder=!strcmp(tokens[0],"REORDER");
     bool begin=!strcmp(tokens[0],"PAIR"),cancel=!strcmp(tokens[0],"CANCEL_PAIR");
-    if(!select && !forget && !rename && !reorder && !begin && !cancel) return false;
-    if(input.active || input.count || sent_consumer || stop_pending || shutting_down || !working) { reply(id,"Pause pointing before managing computers"); return true; }
+    bool disconnect=!strcmp(tokens[0],"DISCONNECT");
+    if(!select && !forget && !rename && !reorder && !begin && !cancel && !disconnect) return false;
+    if(input.active || input.count || sent_consumer || sent_key || stop_pending || shutting_down || !working) { reply(id,"Pause pointing before managing computers"); return true; }
     if(pairing() && !cancel) { reply(id,"Finish or cancel pairing first"); return true; }
-    if((begin || cancel) && count!=2) { close_client(); return true; }
-    if(begin) {
+    if((begin || cancel || disconnect) && count!=2) { close_client(); return true; }
+    if(disconnect) {
+        if(hosts_select(&hosts,0)) fatal("Disconnecting computer");
+        switching_host=0; selected_changed(); disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL);
+    } else if(begin) {
         if(!hosts.next_id || hosts.count==HOSTS_LIMIT || (!simulation && le_device_db_count()>=HOSTS_LIMIT)) reply(id,"Four computers are already paired");
         else { pairing_until=now_ms()+60000; disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL); }
     } else if(cancel) {
@@ -387,6 +406,11 @@ static void command(char *line) {
         else if (!ready() || (!simulation && (!consumer_subscribed || protocol_mode==0))) reply(id,"Media reports unavailable; reconnect or pair this computer again");
         else if (!hid_media(&input,id,(uint16_t)a,now_ms())) { reply(id,"Media queue full"); stop_input(0); }
         else pump();
+    } else if (!strcmp(tokens[0],"KEY") && count==3 && number(tokens[2],0,255,&a)) {
+        if (a<0x4f || a>0x52) reply(id,"Unknown arrow key");
+        else if (!ready() || (!simulation && (!keyboard_subscribed || protocol_mode==0))) reply(id,"Keyboard reports unavailable; reconnect or pair this computer again");
+        else if (!hid_key(&input,id,(uint8_t)a,now_ms())) { reply(id,"Keyboard queue full"); stop_input(0); }
+        else pump();
     } else if (!strcmp(tokens[0],"BUTTON") && count==3 && number(tokens[2],0,3,&a)) {
         if (!ready() || !input.active) reply((uint32_t)id,"Pointer is off");
         else if (!hid_button(&input,(uint32_t)id,(uint8_t)a,now_ms())) {
@@ -394,7 +418,7 @@ static void command(char *line) {
         } else pump();
     } else if (move && count==4 && number(tokens[2],-32767,32767,&a) && number(tokens[3],-32767,32767,&b)) {
         /* Motion is best-effort: a full queue drops this movement and counts it in dropped_motion.
-         * Only button, scroll and media overflow stop pointing, because a lost edge needs recovery.
+         * Only button, scroll, media and keyboard overflow stop pointing, because a lost edge needs recovery.
          * Movement also does not emit status; the 250 ms timer and state changes cover it. */
         if (ready() && input.active) { (void)hid_move(&input,(int32_t)a,(int32_t)b,now_ms()); pump(); }
         return;
@@ -537,6 +561,7 @@ static void query_host_name(void) {
 static void tick_event(btstack_timer_source_t *timer) {
     uint32_t now=now_ms(); notify_service("WATCHDOG=1");
     if(sent_consumer && !stop_pending && (uint32_t)(now-consumer_sent_at)>=RELEASE_MS) stop_input(0);
+    if(sent_key && !stop_pending && (uint32_t)(now-key_sent_at)>=RELEASE_MS) stop_input(0);
     if(fast_advertising && (uint32_t)(now-advertising_started)>=30000) { fast_advertising=false; advertise(); }
     if(switching_host && (uint32_t)(now-switch_started)>=30000) switching_host=0;
     if(pending_name_host && !input.active && !stop_pending) {
@@ -570,6 +595,7 @@ static void establish_ready(void) {
 static void report_snapshot(hci_con_handle_t connection,hid_report_type_t type,uint16_t id,uint16_t size,uint8_t *out) {
     (void)connection; (void)type;
     if (id==2) { memset(out,0,size); if(size) out[0]=(uint8_t)sent_consumer; if(size>1) out[1]=(uint8_t)(sent_consumer>>8); return; }
+    if (id==3) { memset(out,0,size); if(size) out[0]=sent_key; return; }
     size=size<6?size:6; memset(out,0,size); if(size) out[0]=sent_buttons;
 }
 static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t size) {
@@ -595,7 +621,7 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
             handle=gap_subevent_le_connection_complete_get_connection_handle(packet);
             connected_at=now_ms();
             if(switching_host) printf("SWITCH link peer=%08x elapsed_ms=%u\n",switching_host,(uint32_t)(connected_at-switch_started));
-            initialized=false; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=false; sent_consumer=0; protocol_mode=1; sent_buttons=0; hid_reset(&input);
+            initialized=false; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=keyboard_subscribed=false; sent_consumer=0; sent_key=0; protocol_mode=1; sent_buttons=0; hid_reset(&input);
             name_attempted=false; name_phase=0; name_connection=HCI_CON_HANDLE_INVALID;
             interval_units=gap_subevent_le_connection_complete_get_conn_interval(packet);
             if(!hosts.selected_id && !pairing()) disconnect_host();
@@ -604,7 +630,7 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
         break;
     case HCI_EVENT_DISCONNECTION_COMPLETE:
         if(hci_event_disconnection_complete_get_connection_handle(packet)==handle) {
-            handle=HCI_CON_HANDLE_INVALID; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=false; sent_consumer=0; protocol_mode=1; initialized=false; send_requested=false; stop_pending=false; sent_buttons=0;
+            handle=HCI_CON_HANDLE_INVALID; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=keyboard_subscribed=false; sent_consumer=0; sent_key=0; protocol_mode=1; initialized=false; send_requested=false; stop_pending=false; sent_buttons=0;
             name_phase=0; name_connection=HCI_CON_HANDLE_INVALID; name_attempted=false;
             cancel_queued("Bluetooth disconnected"); hid_reset(&input);
             hids_device_init(0,descriptor,sizeof(descriptor));
@@ -658,12 +684,17 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
         if(hci_event_packet_get_type(packet)==HCI_EVENT_ENCRYPTION_CHANGE && hci_event_encryption_change_get_connection_handle(packet)!=handle) break;
         if(hci_event_packet_get_type(packet)==HCI_EVENT_ENCRYPTION_CHANGE_V2 && hci_event_encryption_change_v2_get_connection_handle(packet)!=handle) break;
         if(connected_host() && (pairing() || connected_host()!=hosts.selected_id)) { disconnect_host(); send_status(); break; }
-        if (!encrypted() && (input.active || sent_buttons || sent_consumer || stop_pending)) { initialized=false; stop_input(0); }
+        if (!encrypted() && (input.active || sent_buttons || sent_consumer || sent_key || stop_pending)) { initialized=false; stop_input(0); }
         else establish_ready();
         send_status(); break;
     case HCI_EVENT_HIDS_META:
         switch(hci_event_hids_meta_get_subevent_code(packet)) {
         case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
+            if (hids_subevent_input_report_enable_get_report_id(packet)==3) {
+                keyboard_subscribed=hids_subevent_input_report_enable_get_enable(packet)!=0;
+                if (!keyboard_subscribed && sent_key) { stop_input(0); disconnect_host(); }
+                break;
+            }
             if (hids_subevent_input_report_enable_get_report_id(packet)==2) {
                 consumer_subscribed=hids_subevent_input_report_enable_get_enable(packet)!=0;
                 if (!consumer_subscribed && sent_consumer) { stop_input(0); disconnect_host(); }

@@ -30,17 +30,27 @@ switch deadline in `Controller.switchTimeoutMs` cancels a pending resume. The UI
 choice separately from active output and shows **Connecting** while reports are
 paused.
 
+Tapping the selected quick-switch computer stops input and disconnects Bluetooth.
+The saved pairing remains available, and tapping the computer again reconnects it
+with pointing paused. Disconnect requires the owned backend's device management.
+
 Renaming uses a text field near the top of the screen and the existing native
 keyboard. Save waits for a service acknowledgement. Names are plain text with a
 48-byte UTF-8 limit, and **Use Bluetooth name** clears the custom alias.
 The manager retains a version-1 selection view during rolling upgrades.
 
-Power toggles pointing. Home cycles the first three quick-switch devices while
+The monitor at the top and Power toggle pointing. Home cycles the first three quick-switch devices while
 preserving pointing state. Media buttons send consumer-control press and release
 pairs to the selected device, even while pointing is paused. When `button_edges` is true,
-physical OK and Right presses produce left and right mouse down; release
-produces mouse up. Movement and scrolling preserve held buttons. Repeated press
-events are suppressed. The firmware backend advertises `button_edges: false` and retains complete
+physical OK produces left mouse down and up. The **Left click** and **Right click**
+buttons are 120 px tall, sit flush with the bottom of the screen, and support holding and dragging.
+Settings provides **Click button order** with **Left · Right** and **Right · Left**
+choices. The order persists across restarts and does not change physical OK.
+Movement and scrolling preserve held buttons. Repeated mouse-button press events
+are suppressed. The four direction keys send keyboard arrow presses and releases
+to the selected computer, including repeat presses while held. Arrow keys work
+while pointing is paused and require the owned Bluetooth backend.
+The firmware backend advertises `button_edges: false` and retains complete
 clicks. The [owned Bluetooth backend](owned-bluetooth.md) supports independent
 edges. Bottom-strip movement to the right scrolls down; movement to the left
 scrolls up. Releasing the strip discards residual scroll steps. Physical

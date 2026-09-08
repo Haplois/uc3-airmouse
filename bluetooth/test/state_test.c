@@ -21,5 +21,13 @@ int main(void) {
     assert(!hid_button(&s,50,0,301)); hid_stop(&s,51,302); assert(s.count==1 && !s.buttons && !s.active);
     hid_reset(&s); assert(hid_open(&s)); assert(hid_move(&s,INT_MAX,INT_MIN,0xfffffff0));
     r=hid_peek(&s,0x10); assert(r && r->dx==32767 && r->dy==-32767); assert(!hid_peek(&s,0x50));
-    puts("HID state: hold/move/release, both buttons, wheel, stop, ordering, stale motion, bounds and clock wrap pass");
+    hid_reset(&s);
+    for(unsigned i=0;i<HID_QUEUE_SIZE/2;i++) assert(hid_key(&s,i+1,0x4f+i%4,100));
+    assert(!hid_key(&s,99,0x52,100));
+    for(unsigned i=0;i<HID_QUEUE_SIZE/2;i++) {
+        r=hid_peek(&s,500); assert(r->keyboard && !r->consumer && !r->motion && r->usage==0x4f+i%4 && !r->id); hid_pop(&s);
+        r=hid_peek(&s,500); assert(r->keyboard && !r->usage && r->id==i+1); hid_pop(&s);
+    }
+    assert(!hid_key(&s,100,0,500)); assert(!hid_key(&s,101,0x53,500)); assert(!s.count);
+    puts("HID state checks passed");
 }

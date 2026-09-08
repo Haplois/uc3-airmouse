@@ -87,6 +87,30 @@ test('media uses selected host while paused and stop revokes media delivery', as
   assert.ok(daemon.commands.some(line=>/^STOP /.test(line)));
 });
 
+test('arrow keys encode keyboard usages and reject unavailable hosts', async t => {
+  const daemon=await fakeDaemon(t), output=await connectedOutput(t,daemon);
+  for (const key of ['up','down','left','right']) await output.key('airmouse.host',key);
+  assert.deepEqual(daemon.commands.filter(line=>line.startsWith('KEY ')).map(line=>Number(line.split(' ')[2])),[82,81,80,79]);
+  await assert.rejects(output.key('other','up'),/unavailable/);
+  await assert.rejects(output.key('airmouse.host','enter'),/Unknown/);
+  await output.quiesce();
+  assert.ok(daemon.commands.some(line=>line.startsWith('STOP ')));
+});
+
+test('STOP cancels pending keyboard requests and ignores their late replies', async t => {
+  const daemon=await fakeDaemon(t), output=await connectedOutput(t,daemon);
+  daemon.handle(command=>command!=='KEY');
+  const key=output.key('airmouse.host','up');
+  const canceled=assert.rejects(key,/invalidated by stop/);
+  await waitFor(()=>daemon.commands.some(line=>line.startsWith('KEY ')));
+  const id=Number(daemon.commands.find(line=>line.startsWith('KEY ')).split(' ')[1]);
+  await output.quiesce(); await canceled;
+  daemon.message({id,ok:false,error:'Input stopped'});
+  daemon.handle(()=>true);
+  await output.key('airmouse.host','left');
+  assert.equal(output.connected,true);
+});
+
 test('owned output speaks the exact protocol and preserves absolute button masks', async t => {
   let now = 1000;
   const daemon = await fakeDaemon(t), output = await connectedOutput(t, daemon, { clock: () => now });
@@ -399,5 +423,19 @@ test('home quick switching releases a held button and reopens only the new simul
   await waitFor(()=>controller.pointer&&controller.target==='00000002','pointing resumes');
   assert.equal(output.endpoint.id,'00000002');assert.equal(output.buttons,0);assert.equal(output.desiredButtons,0);
   assert.ok(log.indexOf('TEST_REPORT 0 0 0 0')<log.indexOf('SWITCH requested peer=00000002'),log);
+  for (const key of ['up','down','left','right']) await controller.apply({type:'key',key});
+  await controller.button(2,true);
+  await controller.apply({type:'disconnect'});
+  await waitFor(()=>controller.target==='' && !output.ready('00000002'),'disconnected computer');
+  assert.equal(controller.pointer,false); assert.equal(output.buttons,0); assert.equal(output.targets.length,2);
+  await assert.rejects(controller.apply({type:'key',key:'up'}),/unavailable/);
+  await controller.apply({type:'target',id:'00000002',keep_pointer:true});
+  await waitFor(()=>output.ready('00000002') && !controller.switching,'reconnected computer');
+  assert.equal(controller.pointer,false);
+  await controller.apply({type:'key',key:'up'});
+  await waitFor(()=>log.split('\n').filter(line=>line.startsWith('TEST_KEY ')).length===10,'keyboard reports');
+  assert.deepEqual(log.split('\n').filter(line=>line.startsWith('TEST_KEY ')),[
+    'TEST_KEY 82','TEST_KEY 0','TEST_KEY 81','TEST_KEY 0','TEST_KEY 80','TEST_KEY 0','TEST_KEY 79','TEST_KEY 0','TEST_KEY 82','TEST_KEY 0',
+  ]);
   await controller.stop();
 });

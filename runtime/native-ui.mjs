@@ -96,10 +96,16 @@ export class NativeUI {
       await controller.apply(command);
     } else if (command.type === 'bluetooth_ownership' && exactFields(command, ['id', 'mode', 'type']) && typeof command.mode === 'string') {
       await controller.apply({ type: 'bluetooth_ownership', mode: command.mode });
+    } else if (command.type === 'swap_click_buttons' && exactFields(command, ['id', 'swapped', 'type']) && typeof command.swapped === 'boolean') {
+      await controller.apply({ type: 'swap_click_buttons', swapped: command.swapped });
     } else if (command.type === 'output_rate') {
       await controller.apply({ type: 'output_policy', rate: command.rate });
     } else if (command.type === 'media' && exactFields(command, ['id', 'type', 'key'])) {
       await controller.apply({ type: 'media', key: command.key });
+    } else if (command.type === 'key' && exactFields(command, ['id', 'type', 'key']) && ['up', 'down', 'left', 'right'].includes(command.key)) {
+      await controller.apply({ type: 'key', key: command.key });
+    } else if (command.type === 'disconnect' && exactFields(command, ['id', 'type'])) {
+      await controller.apply({ type: 'disconnect' });
     } else if (command.type === 'pair' && exactFields(command, ['id', 'type'])) {
       await controller.apply({ type: 'pair' });
     } else if (command.type === 'rename' && exactFields(command, ['id', 'name', 'target', 'type'])

@@ -24,7 +24,7 @@ TestCase {
         for (var key in values) state[key] = values[key];
         bridge.snapshot = state;
     }
-    function init() { bridge.connected=true; bridge.busy=false; page.releaseButtons(); update({button_edges:true,bluetooth_backend:"owned",paired:true,pointer:false,pointer_enabled:false,switching:false,ready:true,theme:"black",output_rate:500,stop_reason:"Pointer off",calibrating:false,error:""}); bridge.commands=[]; page.screenPage="mouse"; wait(20); }
+    function init() { bridge.connected=true; bridge.busy=false; page.releaseButtons(); update({swap_click_buttons:false,core_connected:true,bluetooth_ownership:"always",ownership_status:"",target:"a",button_edges:true,bluetooth_backend:"owned",paired:true,pointer:false,pointer_enabled:false,switching:false,ready:true,theme:"black",output_rate:500,stop_reason:"Pointer off",calibrating:false,error:""}); bridge.commands=[]; page.screenPage="mouse"; wait(20); }
     function test_button_edges_during_busy() {
         update({pointer:true}); bridge.busy=true;
         page.buttonPressed(1); page.buttonPressed(1); page.buttonPressed(2);
@@ -67,9 +67,9 @@ TestCase {
         update({paired:false,bluetooth_backend:"core"}); compare(button.text,"All devices ›");
     }
     function test_main() {
-        verify(findChild(page,"pointerButton"));
+        verify(findChild(page,"monitorButton"));
         verify(findChild(page,"allDevicesButton").height>=48);
-        mouseClick(findChild(page,"pointerButton"));
+        mouseClick(findChild(page,"monitorButton"));
         compare(bridge.commands[0].type,"on");
         mouseClick(findChild(page,"quickTarget1"));
         compare(bridge.commands[1].target,"b");
@@ -80,8 +80,8 @@ TestCase {
         compare(bridge.commands[0],{type:"target",target:"b",keep_pointer:true});
         update({pointer:false,pointer_enabled:true,switching:true,ready:false});
         bridge.busy=true;
-        compare(findChild(page,"pointerButton").text,"Pause pointing");
-        verify(findChild(page,"pointerButton").enabled);
+        compare(findChild(page,"monitorButton").Accessible.name,"Pause pointing");
+        verify(findChild(page,"monitorButton").enabled);
         page.toggle();compare(bridge.commands[1].type,"off");
         page.navigate("settings");compare(bridge.commands[2].type,"off");
     }
@@ -91,6 +91,70 @@ TestCase {
         var center=contents.mapToItem(button,contents.width/2,contents.height/2);
         verify(Math.abs(center.x-button.width/2)<0.5);
         verify(Math.abs(center.y-button.height/2)<=0.5,"Contents y offset: "+(center.y-button.height/2));
+    }
+    function test_active_profile_disconnects_after_releasing_input() {
+        update({pointer:true,pointer_enabled:true});
+        page.buttonPressed(1); page.beginScroll();
+        mouseClick(findChild(page,"quickTarget0"));
+        compare(bridge.commands,[{type:"button",button:1,down:true},{type:"button",button:1,down:false},{type:"disconnect"}]);
+        compare(page.touching,false); compare(page.heldButtons,0);
+        update({pointer:false,pointer_enabled:false,target:"",ready:false});
+        mouseClick(findChild(page,"quickTarget0"));
+        compare(bridge.commands[3],{type:"target",target:"a",keep_pointer:true});
+    }
+    function test_bottom_click_buttons() {
+        verify(!findChild(page,"pointerButton"));
+        update({pointer:true});
+        var left=findChild(page,"leftClickButton"), right=findChild(page,"rightClickButton");
+        for (var button of [left,right]) {
+            var position=button.mapToItem(page,0,0);
+            compare(button.height,120);
+            compare(position.y+button.height,page.height);
+            verify(position.x>=0 && position.x+button.width<=page.width);
+        }
+        mousePress(left); update({}); wait(20);
+        compare(findChild(page,"leftClickButton"),left); compare(page.heldButtons,1);
+        page.buttonPressed(1); mouseRelease(left);
+        compare(bridge.commands,[{type:"button",button:1,down:true}]);
+        page.buttonReleased(1);
+        compare(bridge.commands[1],{type:"button",button:1,down:false});
+        mouseClick(right);
+        compare(bridge.commands.slice(2),[{type:"button",button:2,down:true},{type:"button",button:2,down:false}]);
+        mousePress(right); mouseMove(right,-20,-20); mouseRelease(right,-20,-20);
+        compare(page.heldButtons,0); compare(page.touchButtons,0);
+        update({pointer:false}); verify(!left.enabled); verify(!right.enabled);
+    }
+    function test_swap_click_button_order() {
+        page.navigate("settings"); wait(20);
+        var normal=findChild(page,"buttonOrderNormal"), swapped=findChild(page,"buttonOrderSwapped");
+        verify(normal.primary); verify(!swapped.primary);
+        mouseClick(swapped);
+        compare(bridge.commands,[{type:"swap_click_buttons",swapped:true}]);
+        verify(normal.primary);
+        update({swap_click_buttons:true}); verify(swapped.primary);
+        bridge.busy=true; verify(!normal.enabled); bridge.busy=false;
+        page.navigate("mouse"); wait(20); update({pointer:true});
+        var left=findChild(page,"leftClickButton"), right=findChild(page,"rightClickButton");
+        verify(right.x<left.x); compare(right.text,"Right click"); compare(left.text,"Left click");
+        mouseClick(right); mouseClick(left);
+        compare(bridge.commands.slice(1),[
+            {type:"button",button:2,down:true},{type:"button",button:2,down:false},
+            {type:"button",button:1,down:true},{type:"button",button:1,down:false}
+        ]);
+        update({pointer:false}); page.navigate("settings"); wait(20);
+        mouseClick(findChild(page,"buttonOrderNormal"));
+        compare(bridge.commands[5],{type:"swap_click_buttons",swapped:false});
+        update({swap_click_buttons:false}); page.navigate("mouse"); wait(20);
+        verify(findChild(page,"leftClickButton").x<findChild(page,"rightClickButton").x);
+    }
+    function test_monitor_toggles_and_respects_readiness() {
+        var monitor=findChild(page,"monitorButton");
+        mouseClick(monitor); compare(bridge.commands[0],{type:"on"});
+        update({pointer:true,pointer_enabled:true});
+        page.buttonPressed(1); mouseClick(monitor);
+        compare(bridge.commands.slice(1),[{type:"button",button:1,down:true},{type:"button",button:1,down:false},{type:"off"}]);
+        update({pointer:false,pointer_enabled:false,ready:false}); verify(!monitor.enabled);
+        update({ready:true}); bridge.connected=false; verify(!monitor.enabled);
     }
     function test_settings() {
         mouseClick(findChild(page,"settingsButton")); wait(20);
