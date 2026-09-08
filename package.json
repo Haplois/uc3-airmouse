@@ -1,0 +1,19 @@
+{
+  "name": "uc3-airmouse",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "python3 tools/airmouse-build",
+    "build:native": "python3 tools/airmouse-ui-build",
+    "test:native": "QML_XHR_ALLOW_FILE_READ=1 xvfb-run -a qmltestrunner -input native/test"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  }
+}

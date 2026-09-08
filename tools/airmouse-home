@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Provision the Air mouse button entity and place it on Living room."""
+import argparse
+import pathlib
+import re
+import shlex
+import subprocess
+
+root=pathlib.Path(__file__).resolve().parent.parent
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('command',choices=['prepare','apply','verify'])
+parser.add_argument('--host',default='root@10.0.10.51')
+args=parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*',args.host):parser.error('Expected user@host')
+ssh=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',args.host]
+def remote(*cmd,data=None):
+    return subprocess.run(ssh+[shlex.join(cmd)],input=data,check=True)
+script=(root/'deploy/native-home.mjs').read_bytes()
+remote('mkdir','-p','-m','700','/mnt/data/airmouse/native-ui')
+remote('sh','-eu','-c','cat > /mnt/data/airmouse/native-ui/native-home.mjs',data=script)
+if args.command=='prepare':
+    remote('node','/mnt/data/airmouse/native-ui/native-home.mjs','prepare')
+    remote('systemctl','daemon-reload')
+else:
+    remote('node','/mnt/data/airmouse/native-ui/native-home.mjs',args.command)

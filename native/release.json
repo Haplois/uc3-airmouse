@@ -1,0 +1,16 @@
+{
+  "name": {
+    "en": "Air mouse Dock"
+  },
+  "version": "0.74.5-airmouse.12",
+  "description": {
+    "en": "Native Air mouse app launched from a standard button entity. Bluetooth ownership setting: always, while open, or never. Based on Remote UI v0.74.5."
+  },
+  "developer": {
+    "name": "haplois"
+  },
+  "release_date": "2026-09-08",
+  "requirements": {
+    "firmware_version": "=2.10.2"
+  }
+}

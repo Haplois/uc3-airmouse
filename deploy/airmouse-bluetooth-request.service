@@ -1,0 +1,7 @@
+[Unit]
+Description=Apply an Air mouse Bluetooth ownership request
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /mnt/data/airmouse/bluetooth/owned-bluetooth.sh request
+TimeoutStartSec=150

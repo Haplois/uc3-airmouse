@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Measure paused Bluetooth switching among the first three computers, then restore selection.
+
+Requires the Air mouse app closed and pointing off. Sends selection commands only.
+"""
+import argparse
+import re
+import subprocess
+
+SCRIPT = r"""import fs from 'node:fs';
+import net from 'node:net';
+import {setTimeout as delay} from 'node:timers/promises';
+const before=JSON.parse(fs.readFileSync('/mnt/data/airmouse/state/status.json'));
+if(before.pointer||before.buttons||before.control_connected||before.switching)throw Error('Close Air mouse and leave pointing off before measuring');
+if(!before.target||before.targets.length<2)throw Error('Two saved computers and a selected computer are required');
+const socket=net.createConnection('/mnt/data/airmouse/ui/control.sock');
+let state,buffer='',next=1,closed=false;
+const replies=new Map();
+socket.on('error',()=>{});socket.on('close',()=>{closed=true;});
+socket.setEncoding('utf8');socket.on('data',chunk=>{buffer+=chunk;while(buffer.includes('\n')){const end=buffer.indexOf('\n');const m=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);if(m.state)state=m.state;else if(m.id)replies.set(m.id,m);}});
+async function until(check,ms=10000){const start=performance.now();while(!check()){if(closed)throw Error('UI service disconnected');if(performance.now()-start>ms)throw Error('Computer connection timed out');await delay(10);}}
+const heartbeat=setInterval(()=>{if(!closed)socket.write('{"type":"ping"}\n');},250);
+async function select(target){const id=next++,start=performance.now();socket.write(JSON.stringify({id,type:'target',target})+'\n');await until(()=>replies.has(id));const ack=replies.get(id);replies.delete(id);if(!ack.ok)throw Error(ack.error);const ackMs=performance.now()-start;await until(()=>state.target===target&&state.ready&&!state.pointer);return {target,ack_ms:Math.round(ackMs),ready_ms:Math.round(performance.now()-start)};}
+const results=[];
+try{await until(()=>state,2500);if(state.pointer||state.buttons)throw Error('Pointer must remain off');for(const target of before.targets.slice(0,3).filter(t=>t.id!==before.target))results.push(await select(target.id));results.push(await select(before.target));}
+finally{if(!closed&&state&&state.target!==before.target)try{await select(before.target);}catch(e){results.push({restore_error:e.message});}clearInterval(heartbeat);socket.destroy();console.log(JSON.stringify({results,original_target:before.target},null,2));}
+"""
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default='root@10.0.10.51')
+    args = parser.parse_args()
+    if not re.fullmatch(r'root@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+        parser.error('Expected root@host')
+    subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                    '-o', 'ConnectTimeout=8', args.host, 'node --input-type=module'],
+                   input=SCRIPT.encode(), check=True, timeout=60)

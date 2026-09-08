@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Build the native Dock page into a pinned copy of the open-source Remote UI.
+
+The patch() calls below carry replacement lines for Remote UI source files, which are
+GPL-3.0-or-later; this tool is therefore licensed the same way. The other files it copies
+from native/ keep their own licenses.
+"""
+import argparse
+import pathlib
+import shutil
+import subprocess
+import tarfile
+import io
+
+root = pathlib.Path(__file__).resolve().parent.parent
+revision = 'f3d34daea76239a92b5d43793f9eb849e5d0fc19'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--source', type=pathlib.Path, default=pathlib.Path('/tmp/uc3-airmouse-reference/remote-ui'))
+parser.add_argument('--work', type=pathlib.Path, default=pathlib.Path('/tmp/airmouse-native-build'))
+parser.add_argument('--desktop', action='store_true')
+parser.add_argument('--prepare', action='store_true')
+parser.add_argument('--preview', action='store_true')
+args = parser.parse_args()
+work = args.work.resolve()
+if work == root or root in work.parents: parser.error('Use a build directory outside the application repository')
+marker = work / '.airmouse-native-build'
+if work.exists() and not marker.exists(): parser.error('Existing directory is not an Air mouse build directory')
+work.mkdir(parents=True, exist_ok=True)
+marker.write_text(revision + '\n')
+archive = subprocess.check_output(['git', '-C', str(args.source), 'archive', revision])
+with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+    tar.extractall(work, filter='data')
+subprocess.run(['git', '-C', str(args.source), 'submodule', 'update', '--init', '--recursive'], check=True)
+shutil.copytree(args.source / '3rd-party/QR-Code-generator', work / '3rd-party/QR-Code-generator', dirs_exist_ok=True, ignore=shutil.ignore_patterns('.git'))
+if (work / 'native').exists(): shutil.rmtree(work / 'native')
+shutil.copytree(root / 'native', work / 'native')
+def patch(path, before, after):
+    file = work / path
+    content = file.read_text()
+    if content.count(before) != 1: raise RuntimeError(f'Patch anchor changed: {path}')
+    file.write_text(content.replace(before, after))
+patch('src/main.cpp', '#include <QGuiApplication>', '#include <QGuiApplication>\n#include <QQmlContext>\n#include "../native/cpp/AirMouseBridge.h"')
+patch('src/main.cpp', '    QQmlApplicationEngine engine;', '    AirMouseBridge airMouseBridge;\n    QQmlApplicationEngine engine;')
+patch('src/main.cpp', '    engine.load(url);', '    engine.rootContext()->setContextProperty("airMouseBridge", &airMouseBridge);\n    engine.load(url);')
+patch('src/qml/main.qml', 'import QtQuick 2.15', 'import QtQuick 2.15\nimport "qrc:/airmouse/Launcher.js" as AirMouseLauncher')
+patch('src/qml/main.qml', '    function loadSecondContainer(source, parameters = {}, openAfterLoad = true) {', '''    property bool airMouseOpen: false
+    function launchAirMouseEntity(entityId) {
+        return AirMouseLauncher.launch(entityId, airMouseBridge.launchEntityId, airMouseOpen,
+            function(source) { loadSecondContainer(source); });
+    }
+    function loadSecondContainer(source, parameters = {}, openAfterLoad = true) {''')
+patch('src/qml/main.qml', '            console.debug("Loading second container", source);', '            airMouseOpen = source === "qrc:/airmouse/AirMouseHost.qml";\n            console.debug("Loading second container", source);')
+patch('src/qml/main.qml', '                    console.debug("Second container closed signal called");', '                    applicationWindow.airMouseOpen = false;\n                    console.debug("Second container closed signal called");')
+patch('src/qml/components/TouchSlider.qml', '    function startSetup() {', '    Connections { target: applicationWindow; function onAirMouseOpenChanged() { touchSlider.refreshSetup(); } }\n\n    function startSetup() {\n        if (applicationWindow.airMouseOpen) { sliderLoader.source = ""; touchSlider.close(); return; }')
+patch('src/qml/components/entities/Base.qml', '    function open() {', '''    function open() {
+        if (entityObj && currentEntityObj.type === EntityTypes.Button &&
+            applicationWindow.launchAirMouseEntity(entityId)) return;''')
+patch('src/qml/components/entities/Base.qml', '                entityObj.push();', '''                if (!applicationWindow.launchAirMouseEntity(entityId)) entityObj.push();''')
+qrc = work / 'resources/qrc/airmouse.qrc'
+qrc.write_text('<RCC><qresource prefix="/airmouse">\n' + ''.join(f'<file alias="{p.name}">../../native/qml/{p.name}</file>\n' for p in sorted((root / 'native/qml').glob('*')) if p.suffix in ['.qml', '.js']) + '</qresource></RCC>\n')
+with (work / 'remote-ui.pro').open('a') as f:
+    f.write('\nHEADERS += native/cpp/AirMouseBridge.h\nSOURCES += native/cpp/AirMouseBridge.cpp\nRESOURCES += resources/qrc/airmouse.qrc\n')
+project = 'native/preview.pro' if args.preview else 'remote-ui.pro'
+if args.prepare:
+    print(work)
+elif args.desktop:
+    subprocess.run(['qmake', project, 'CONFIG+=release', 'UC_BUILD_VERSION=0.74.5-airmouse'], cwd=work, check=True)
+    subprocess.run(['make', '-j4'], cwd=work, check=True)
+else:
+    subprocess.run(['docker', 'run', '--rm', '--user', f'{__import__("os").getuid()}:{__import__("os").getgid()}', '-v', f'{work}:/sources', '--entrypoint', 'sh', 'unfoldedcircle/r2-toolchain-qt-5.15.8-static:latest', '-c', f'mkdir -p /tmp/build && cd /tmp/build && qmake /sources/{project} CONFIG+=static CONFIG+=release UC_BUILD_VERSION=0.74.5-airmouse && make -j4'], check=True)
+    name = 'airmouse-preview' if args.preview else 'remote-ui'
+    binary = work / ('binaries/preview/airmouse-preview' if args.preview else 'binaries/linux-arm64/release/remote-ui')
+    if not binary.exists():
+        matches = list((work / 'binaries').rglob(name))
+        if len(matches) != 1: raise RuntimeError('Expected one native binary')
+        binary = matches[0]
+    output = root / 'dist/native-ui'
+    output.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, output / name)
+    print(output / name)

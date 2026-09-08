@@ -1,0 +1,30 @@
+[Unit]
+Description=Air mouse single-host Bluetooth HID
+After=btstack.service btuart.service
+OnFailure=airmouse-bluetooth-rollback.service
+ConditionPathExists=/run/airmouse-bluetooth-takeover/prepared
+
+[Service]
+Type=notify
+User=uccore
+Group=airmouse
+RuntimeDirectory=airmouse-bt
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStartPre=+/bin/sh /mnt/data/airmouse/bluetooth/owned-bluetooth.sh power-on
+ExecStart=/mnt/data/airmouse/bluetooth/current/bin/airmouse-hid --socket /run/airmouse-bt/control.sock --state-dir /mnt/data/airmouse/bluetooth/state --firmware /opt/uc/bt/fw/init/BCM4373A0_001.001.025.0103.0155.FCC.CE.2BC.hcd
+ExecStopPost=+/bin/sh /mnt/data/airmouse/bluetooth/owned-bluetooth.sh power-off
+WatchdogSec=3
+TimeoutStartSec=20
+TimeoutStopSec=2
+Restart=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/data/airmouse/bluetooth/state /run/airmouse-bt /sys/class/gpio/gpio28
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/ttyS1 rw
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryMax=64M

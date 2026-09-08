@@ -1,0 +1,39 @@
+[Unit]
+Description=Remote 3 air mouse
+After=remote-core.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=airmouse
+Group=airmouse
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/mnt/data/airmouse/current
+Environment=AIRMOUSE_STATE=/mnt/data/airmouse/state
+RuntimeDirectory=airmouse
+RuntimeDirectoryMode=0700
+# Preserved so Bluetooth ownership requests and the root helper's hold marker survive restarts.
+RuntimeDirectoryPreserve=yes
+ExecStartPre=+/usr/bin/node /mnt/data/airmouse/current/runtime/permissions.mjs
+ExecStartPre=/usr/bin/flock -n /run/airmouse/sensor.lock /usr/bin/node /mnt/data/airmouse/current/runtime/main.mjs recover
+ExecStart=/usr/bin/flock -F -n /run/airmouse/sensor.lock /usr/bin/node /mnt/data/airmouse/current/runtime/main.mjs
+ExecStopPost=/usr/bin/flock -n /run/airmouse/sensor.lock /usr/bin/node /mnt/data/airmouse/current/runtime/main.mjs recover
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The sensor sysfs path and device node come from the generated drop-in airmouse.service.d/sensor.conf.
+ReadWritePaths=/mnt/data/airmouse/ui /mnt/data/airmouse/state /run/airmouse
+ReadWritePaths=+/mnt/data/airmouse/permissions.json
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryMax=100M
+
+[Install]
+WantedBy=multi-user.target

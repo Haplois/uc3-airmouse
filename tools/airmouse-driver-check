@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Check BMI323 ODR encodings, timestamp periods, and the prototype's 2x sampling policy."""
+from fractions import Fraction
+import json
+from pathlib import Path
+import re
+import subprocess
+
+root = Path(__file__).resolve().parent.parent
+source = (root / 'drivers/bmi323/bmi323_core.c').read_text()
+table = re.search(r'bmi323_acc_gyro_odr\[\]\[2\] = \{(.*?)\n\};', source, re.S)[1]
+rates = [Fraction(int(whole)) + Fraction(int(micro), 1_000_000)
+         for whole, micro in re.findall(r'\{\s*(\d+),\s*(\d+)\s*\}', table)]
+expected = [Fraction(25, 32) * 2 ** index for index in range(13)]
+if rates != expected:
+    raise SystemExit('ODR table no longer matches the BMI323 register encodings through 3200 Hz')
+period_table = re.search(r'bmi323_acc_gyro_odrns\[\] = \{(.*?)\n\};', source, re.S)[1]
+periods = []
+for expression in period_table.split(','):
+    expression = expression.strip()
+    if not expression:
+        continue
+    factors = expression.replace('MEGA', '1000000').replace('KILO', '1000').split('*')
+    value = 1
+    for factor in factors:
+        value *= int(factor.strip())
+    periods.append(value)
+if periods != [1_000_000_000 / rate for rate in rates]:
+    raise SystemExit('FIFO timestamp periods do not match their ODR encodings')
+
+policy_module = json.dumps((root / 'runtime/ui-policy.mjs').as_uri())
+policy = json.loads(subprocess.check_output(['node', '--input-type=module', '-e',
+    f'import {{sensorRates, samplingPolicy}} from {policy_module}; '
+    'console.log(JSON.stringify({rates:sensorRates, choices:Array.from({length:100}, (_,i)=>samplingPolicy((i+1)*10,sensorRates).selected)}));'], text=True))
+ui_rates = policy['rates']
+if any(rate not in rates for rate in ui_rates) or sorted(set(ui_rates)) != ui_rates:
+    raise SystemExit('Production policy offers an unsupported or unordered sensor rate')
+for output in range(10, 1001, 10):
+    chosen = next((rate for rate in ui_rates if rate >= 2 * output), None)
+    if chosen is None or policy['choices'][output // 10 - 1] != chosen:
+        raise SystemExit(f'No supported sampling rate for {output} Hz output')
+examples = [{'output_limit_hz': output,
+             'nominal_sensor_hz': next(rate for rate in ui_rates if rate >= 2 * output)}
+            for output in [100, 200, 400, 500, 750, 800, 1000]]
+print(json.dumps({'odr_encodings_checked': len(rates), 'timestamp_periods_match': True,
+                  'output_slider_values_covered': 100, 'examples': examples,
+                  'device_validation': 'pending; original drivers remain installed'}, indent=2))

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Read Remote 3 hardware capabilities over SSH without changing device state."""
+import argparse
+import subprocess
+import sys
+
+REMOTE_PROBE = r'''
+set -eu
+export LC_ALL=C
+printf '# Remote 3 capability snapshot\n'
+date -u '+observed_utc=%Y-%m-%dT%H:%M:%SZ'
+uname -smr
+if [ -r /etc/uc-release ]; then
+    sed -n '/^UC_OS_VERSION=/p; /^UC_MODEL=/p' /etc/uc-release
+fi
+found=0
+for device in /sys/bus/iio/devices/iio:device*; do
+    [ -r "$device/name" ] || continue
+    name=$(cat "$device/name")
+    printf '\niio_device=%s name=%s\n' "$device" "$name"
+    case "$name" in *bmi323*) ;; *) continue ;; esac
+    found=1
+    for attribute in in_accel_scale in_anglvel_scale \
+        in_accel_sampling_frequency in_anglvel_sampling_frequency \
+        in_accel_sampling_frequency_available in_anglvel_sampling_frequency_available \
+        in_accel_mount_matrix in_anglvel_mount_matrix buffer/enable; do
+        if [ -r "$device/$attribute" ]; then
+            printf '%s=' "$attribute"
+            cat "$device/$attribute"
+        fi
+    done
+    for channel in in_accel_x_raw in_accel_y_raw in_accel_z_raw \
+        in_anglvel_x_raw in_anglvel_y_raw in_anglvel_z_raw; do
+        printf '%s=' "$channel"
+        if ! cat "$device/$channel"; then
+            printf 'unavailable\n'
+        fi
+    done
+    node="/dev/${device##*/}"
+    if [ -e "$node" ]; then ls -l "$node"; fi
+    printf 'scan_layout\n'
+    for attribute in "$device"/scan_elements/*; do
+        [ -r "$attribute" ] || continue
+        printf '%s=' "${attribute##*/}"
+        cat "$attribute"
+    done
+done
+printf '\nbmi323_found=%s\n' "$found"
+for unit in btstack.service remote-core.service remote-ui.service intg-androidtv.service; do
+    printf '\nservice=%s\n' "$unit"
+    systemctl show "$unit" --no-pager \
+        -p LoadState -p ActiveState -p User -p Group \
+        -p PrivateDevices -p DevicePolicy -p InaccessiblePaths
+done
+if [ "$found" -ne 1 ]; then exit 2; fi
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="root@10.0.10.51", help="SSH destination")
+    args = parser.parse_args()
+    if args.host.startswith("-") or any(c.isspace() for c in args.host):
+        parser.error("host must be a single SSH destination, not an option")
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+             "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=5",
+             "-o", "ServerAliveCountMax=2", args.host, "sh -s"],
+            input=REMOTE_PROBE, text=True, timeout=35, check=False,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print("Capability probe timed out after 35 seconds.", file=sys.stderr)
+        return 124
+    except FileNotFoundError:
+        print("SSH client is required.", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())

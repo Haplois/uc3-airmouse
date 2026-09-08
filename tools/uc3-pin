@@ -1,5 +1,0 @@
-#!/bin/sh
-set -eu
-
-repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-exec dotnet run --project "$repository/src/Uc3.PinAccess" -- "$@"

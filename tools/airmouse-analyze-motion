@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { MotionFilter } from '../runtime/motion.mjs';
+
+const filename = process.argv[2];
+if (!filename) throw new Error('Usage: tools/airmouse-analyze-motion CAPTURE.jsonl');
+const samples = fs.readFileSync(filename, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+if (samples.length < 2 || samples.length > 100000) throw new Error('Expected 2–100000 samples');
+const dot = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0);
+const normalize = v => { const length = Math.hypot(...v); return length > 1e-9 ? v.map(x => x / length) : [0, 0, 0]; };
+const mean = (batch, field) => [0, 1, 2].map(i => batch.reduce((sum, s) => sum + s[field][i], 0) / batch.length);
+const covariance = [0, 1, 2].map(i => [0, 1, 2].map(j => samples.reduce((sum, s) => sum + s.gyro[i] * s.gyro[j], 0) / samples.length));
+const largest = covariance.map((row, i) => row[i]).reduce((best, value, i, a) => value > a[best] ? i : best, 0);
+let axis = [0, 1, 2].map(i => i === largest ? 1 : 0);
+for (let i = 0; i < 20; i++) axis = normalize(covariance.map(row => dot(row, axis)));
+const energy = covariance.reduce((sum, row, i) => sum + row[i], 0);
+const start = samples[0].time;
+const timeline = [];
+for (let t = start; t < samples.at(-1).time; t += 0.5) {
+  const batch = samples.filter(s => s.time >= t && s.time < t + 0.5);
+  if (batch.length) timeline.push({ seconds: +(t - start).toFixed(1), gyro: mean(batch, 'gyro'), accel: mean(batch, 'accel') });
+}
+const replay = forwardAxis => {
+  const filter = new MotionFilter({ generation: samples[0].generation, forwardAxis });
+  let horizontal = 0, vertical = 0;
+  for (const sample of samples) {
+    const delta = filter.step(sample);
+    if (delta) { horizontal += Math.abs(delta.dx); vertical += Math.abs(delta.dy); }
+  }
+  return { forwardAxis, horizontal_counts: horizontal, vertical_counts: vertical };
+};
+console.log(JSON.stringify({
+  samples: samples.length, duration_seconds: samples.at(-1).time - start,
+  principal_gyro_axis: axis,
+  principal_energy_fraction: energy ? dot(axis, covariance.map(row => dot(row, axis))) / energy : 0,
+  candidates: [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(replay),
+  timeline,
+}, null, 2));

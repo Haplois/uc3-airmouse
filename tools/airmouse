@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Repeatable deployment and diagnostics over existing authorized SSH."""
+import argparse
+import getpass
+import gzip
+import pathlib
+import re
+import shlex
+import subprocess
+
+root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('command', choices=['build', 'deploy', 'status', 'stop', 'rollback', 'provision', 'targets', 'record', 'verify', 'inspect', 'crash-check', 'tune', 'benchmark', 'link-check'])
+parser.add_argument('--rate', type=int, choices=[50, 100, 200, 400, 800], default=400)
+parser.add_argument('--seconds', type=float, default=3)
+parser.add_argument('--sensitivity', type=float, help='Pointer sensitivity in counts/radian, 1–10000')
+parser.add_argument('--bluetooth-rate', type=float, help='Movement output rate limit in Hz, 10–1000')
+parser.add_argument('--bluetooth-ownership', choices=['always', 'session', 'never'], help='When the service owns the Bluetooth stack: from boot, while the app is open, or never')
+range_args = parser.add_mutually_exclusive_group()
+range_args.add_argument('--keep-range', action='store_true', help='Diagnostic capture only: leave gyro range unchanged')
+range_args.add_argument('--gyro-range', type=int, choices=[500, 2000], default=500, help='Gyro range in degrees/second for sensor-only recording')
+parser.add_argument('--output', type=pathlib.Path, help='Save a diagnostic recording to this local JSONL file')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', args.host]
+base = '/mnt/data/airmouse'
+
+def remote(*command, data=None):
+    return subprocess.run(ssh + [shlex.join(command)], input=data, check=True)
+
+if args.command in ['build', 'deploy']:
+    result = subprocess.run(['python3', str(root / 'tools/airmouse-build')], cwd=root, check=True, capture_output=True, text=True)
+    archive = pathlib.Path(result.stdout.strip().splitlines()[-1])
+    if args.command == 'build':
+        print(archive)
+    else:
+        release = archive.name.removeprefix('airmouse-').removesuffix('.tar.gz')
+        remote('mkdir', '-p', f'{base}/releases/{release}')
+        remote('tar', '-x', '-f', '-', '-C', f'{base}/releases/{release}', data=gzip.decompress(archive.read_bytes()))
+        remote('sh', f'{base}/releases/{release}/deploy/install.sh', release)
+elif args.command == 'status':
+    remote('systemctl', 'status', 'airmouse.service', '--no-pager')
+    remote('cat', f'{base}/state/status.json')
+elif args.command == 'benchmark':
+    remote('node', f'{base}/current/runtime/core-benchmark.mjs')
+elif args.command == 'link-check':
+    remote('systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-link-check', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'SupplementaryGroups=systemd-journal', '/usr/bin/node', f'{base}/current/runtime/link-check.mjs')
+elif args.command == 'stop':
+    remote('systemctl', 'stop', 'airmouse.service')
+elif args.command == 'tune':
+    if args.sensitivity is None and args.bluetooth_rate is None and args.bluetooth_ownership is None:
+        parser.error('Specify --sensitivity, --bluetooth-rate, and/or --bluetooth-ownership')
+    if args.sensitivity is not None and not 1 <= args.sensitivity <= 10000:
+        parser.error('Sensitivity must be within 1–10000 counts/radian')
+    if args.bluetooth_rate is not None and not 10 <= args.bluetooth_rate <= 1000:
+        parser.error('Bluetooth rate must be within 10–1000 Hz')
+    remote('systemctl', 'stop', 'airmouse.service')
+    try:
+        remote('systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-tune', '-p', 'User=airmouse', '-p', 'Group=airmouse', '/usr/bin/node', f'{base}/current/runtime/tune.mjs', f'{base}/state', str(args.sensitivity) if args.sensitivity is not None else '-', str(args.bluetooth_rate) if args.bluetooth_rate is not None else '-', args.bluetooth_ownership or '-')
+    finally:
+        remote('systemctl', 'start', 'airmouse.service')
+elif args.command == 'rollback':
+    # Older releases keep the helper under deploy/. Resolve it before touching the service so a
+    # missing helper cannot leave the service disabled with permissions still granted.
+    remote('sh', '-eu', '-c', f'''helper=
+for candidate in {base}/current/runtime/permissions.mjs {base}/current/deploy/permissions.mjs; do
+  if test -f "$candidate"; then helper=$candidate; break; fi
+done
+test -n "$helper" || {{ echo 'No permissions helper in the current release; nothing changed' >&2; exit 1; }}
+systemctl disable --now airmouse.service
+test ! -f {base}/state/sensor-journal.json
+node "$helper" restore
+rm -f /etc/systemd/system/airmouse.service.d/sensor.conf
+echo 'Air mouse disabled; sensor settings and permissions restored. Files and API key retained.'
+''')
+elif args.command in ['provision', 'targets']:
+    mode = 'key' if args.command == 'provision' else args.command
+    data = (getpass.getpass('Current Web Config PIN: ') + '\n').encode() if mode == 'key' else None
+    remote('sh', '-eu', '-c', f'node {base}/current/runtime/provision.mjs {mode}; chown airmouse:airmouse {base}/state/core-api-key', data=data)
+elif args.command in ['verify', 'inspect']:
+    remote('node', f'{base}/current/runtime/check.mjs', args.command)
+elif args.command == 'crash-check':
+    remote('systemctl', 'stop', 'airmouse.service')
+    try:
+        remote('node', f'{base}/current/runtime/crash-check.mjs')
+    finally:
+        remote('systemctl', 'start', 'airmouse.service')
+elif args.command == 'record':
+    if not 0 < args.seconds <= 10:
+        parser.error('Capture duration must be within (0, 10] seconds')
+    remote('systemctl', 'stop', 'airmouse.service')
+    try:
+        capture = [f'{base}/state/last-recording.jsonl'] if args.output else []
+        remote('systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-record', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'RuntimeDirectory=airmouse', '-p', f'ExecStopPost=/usr/bin/node {base}/current/runtime/main.mjs recover', '-E', f'AIRMOUSE_STATE={base}/state', '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock', '/usr/bin/node', f'{base}/current/runtime/record.mjs', f'{base}/state', str(args.rate), str(args.seconds), 'keep-range' if args.keep_range else str(args.gyro_range), *capture)
+        if args.output:
+            with args.output.open('xb') as output:
+                subprocess.run(ssh + [shlex.join(['cat', capture[0]])], stdout=output, check=True)
+    finally:
+        remote('systemctl', 'start', 'airmouse.service')

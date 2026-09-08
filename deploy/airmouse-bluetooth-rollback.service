@@ -1,0 +1,8 @@
+[Unit]
+Description=Restore stock Bluetooth after air mouse failure
+After=airmouse-bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /mnt/data/airmouse/bluetooth/owned-bluetooth.sh rollback
+TimeoutStartSec=120

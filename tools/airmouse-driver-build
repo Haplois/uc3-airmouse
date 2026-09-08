@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Build experimental Remote 3 modules against captured firmware headers and CRCs.
+
+Inputs are a disposable Linux 6.6.23 source tree, the device's kheaders archive,
+and a tar of its /lib/modules/6.6.23/{kernel,updates} directories.
+"""
+import argparse
+import pathlib
+import re
+import shutil
+import struct
+import subprocess
+import tarfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--source', type=pathlib.Path, required=True)
+parser.add_argument('--headers', type=pathlib.Path, required=True)
+parser.add_argument('--modules', type=pathlib.Path, required=True)
+parser.add_argument('--work', type=pathlib.Path, required=True)
+parser.add_argument('--cross-compile', default='aarch64-linux-gnu-')
+args = parser.parse_args()
+root = pathlib.Path(__file__).resolve().parent.parent
+source, work = args.source.resolve(), args.work.resolve()
+work.mkdir(parents=True, exist_ok=True)
+if not re.search(r'^SUBLEVEL = 23$', (source / 'Makefile').read_text(), re.M):
+    parser.error('Expected a disposable Linux 6.6.23 source tree')
+
+def make(*targets):
+    subprocess.run(['make', '-C', str(source), f'O={work}', 'ARCH=arm64',
+                    f'CROSS_COMPILE={args.cross_compile}', *targets], check=True)
+
+def versions(data):
+    if data[:6] != b'\x7fELF\x02\x01':
+        raise ValueError('Expected little-endian ELF64 module')
+    offset = struct.unpack_from('<Q', data, 40)[0]
+    size, count, names_index = struct.unpack_from('<HHH', data, 58)
+    sections = [struct.unpack_from('<IIQQQQIIQQ', data, offset + i * size) for i in range(count)]
+    names = sections[names_index]
+    strings = data[names[4]:names[4] + names[5]]
+    for section in sections:
+        if strings[section[0]:].split(b'\0', 1)[0] != b'__versions':
+            continue
+        values = data[section[4]:section[4] + section[5]]
+        if len(values) % 64:
+            raise ValueError('Unexpected module version record size')
+        for offset in range(0, len(values), 64):
+            yield values[offset + 8:offset + 64].split(b'\0', 1)[0].decode(), struct.unpack_from('<Q', values, offset)[0]
+
+known = {}
+with tarfile.open(args.modules) as archive:
+    for entry in archive:
+        if not entry.isfile() or not entry.name.endswith('.ko'):
+            continue
+        for name, crc in versions(archive.extractfile(entry).read()):
+            if name in known and known[name] != crc:
+                raise ValueError(f'Conflicting firmware CRCs: {name}')
+            known[name] = crc
+if 'module_layout' not in known:
+    raise ValueError('Firmware module layout CRC unavailable')
+
+with tarfile.open(args.headers) as archive:
+    config = archive.extractfile('./include/generated/autoconf.h').read().decode()
+    release = archive.extractfile('./include/generated/utsrelease.h').read().decode()
+    if '"6.6.23"' not in release or '#define CONFIG_MODVERSIONS 1' not in config:
+        raise ValueError('Unexpected firmware kernel headers')
+    if not (work / 'include/config/auto.conf').exists():
+        values = []
+        for name, value in re.findall(r'^#define (CONFIG_\w+) (.+)$', config, re.M):
+            if name.endswith('_MODULE') and value == '1':
+                name, value = name[:-7], 'm'
+            elif value == '1' and not name.endswith(('_VERSION', '_SHIFT', '_SIZE', '_BITS', '_ORDER', '_COUNT')):
+                value = 'y'
+            values.append(f'{name}={value}')
+        (work / '.config').write_text('\n'.join(values) + '\n')
+        make('olddefconfig', 'modules_prepare')
+    for entry in archive:
+        if not entry.isfile():
+            continue
+        relative = pathlib.PurePosixPath(entry.name)
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('Invalid header archive path')
+        destination = (work if 'generated' in relative.parts else source) / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(archive.extractfile(entry).read())
+    (work / 'include/config/auto.conf').touch()
+
+# kheaders strips comments from generated atomic headers. Regenerate those
+# headers and their integrity markers with the matching upstream generators.
+subprocess.run(['sh', str(source / 'scripts/atomic/gen-atomics.sh')], check=True)
+
+# Generate CRCs for controller functions absent from the installed modules.
+# Compare every available overlap before using the additional symbols.
+make('-j4', 'drivers/i2c/i2c-core-base.o', 'drivers/clk/clk.o',
+     'drivers/of/base.o', 'drivers/mfd/syscon.o', 'drivers/clk/clk-devres.o')
+generated = {}
+for file in work.glob('drivers/**/.*.o.cmd'):
+    generated.update((name, int(crc, 16)) for name, crc in re.findall(r'^#SYMVER (\w+) (0x[\da-f]+)$', file.read_text(), re.M))
+overlap = known.keys() & generated.keys()
+if len(overlap) < 20 or any(known[name] != generated[name] for name in overlap):
+    raise ValueError('Generated kernel ABI does not match the running firmware')
+symbols = {**generated, **known}
+symbols.pop('bmi323_core_probe', None)
+(work / 'Module.symvers').write_text(''.join(f'0x{crc:08x}\t{name}\tvmlinux\tEXPORT_SYMBOL\t\n' for name, crc in sorted(symbols.items())))
+for directory in ['bmi323', 'i2c']:
+    make(f'M={root / "drivers" / directory}', 'modules')
+destination = root / 'dist/drivers-6.6.23'
+destination.mkdir(parents=True, exist_ok=True)
+for module in (root / 'drivers').glob('*/*.ko'):
+    shutil.copy2(module, destination / module.name)
+print(f'Built with {len(overlap)} matching firmware CRCs. Kernel version checks remain enabled.')
+print(destination)

@@ -1,0 +1,11 @@
+QT += qml quick quickcontrols2 network
+CONFIG += c++17
+TARGET = airmouse-preview
+SOURCES += cpp/PreviewMain.cpp cpp/AirMouseBridge.cpp
+HEADERS += cpp/AirMouseBridge.h
+RESOURCES += ../resources/qrc/airmouse.qrc
+static { QT += svg }
+DESTDIR = $$PWD/../binaries/preview
+OBJECTS_DIR = $$PWD/../build/preview-$$QT_ARCH/obj
+MOC_DIR = $$PWD/../build/preview-$$QT_ARCH/moc
+RCC_DIR = $$PWD/../build/preview-$$QT_ARCH/rcc

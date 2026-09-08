@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Build the pinned BTstack daemon for ARM64 or local IPC tests."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import tarfile
+import tempfile
+
+PIN = '431d58d5613fd8fae38afe50282b25302de84bf7'
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+def run(*command, **kwargs):
+    return subprocess.run(command, check=True, **kwargs)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--arch', choices=['arm64', 'host'], default='arm64')
+    parser.add_argument('--btstack', type=pathlib.Path, default=pathlib.Path('/tmp/uc3-airmouse-reference/btstack'))
+    parser.add_argument('--output-dir', type=pathlib.Path, default=ROOT / 'dist')
+    args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    run('git', '-C', str(args.btstack), 'cat-file', '-e', PIN + '^{commit}')
+    with tempfile.TemporaryDirectory(prefix='airmouse-bt-build-', dir=args.output_dir) as temporary:
+        work = pathlib.Path(temporary)
+        source = work / 'btstack'
+        source.mkdir()
+        archive = work / 'btstack.tar'
+        with archive.open('wb') as destination:
+            run('git', '-C', str(args.btstack), 'archive', '--format=tar', PIN, stdout=destination)
+        with tarfile.open(archive) as tar:
+            tar.extractall(source, filter='data')
+        build = work / 'build'
+        options = ['-DCMAKE_BUILD_TYPE=Release', '-DBTSTACK_ROOT=' + str(source)]
+        if args.arch == 'arm64':
+            options += ['-DCMAKE_SYSTEM_NAME=Linux', '-DCMAKE_SYSTEM_PROCESSOR=aarch64',
+                        '-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc', '-DCMAKE_EXE_LINKER_FLAGS=-static']
+        run('cmake', '-S', str(ROOT / 'bluetooth'), '-B', str(build), *options)
+        run('cmake', '--build', str(build), '--parallel', str(min(4, os.cpu_count() or 1)))
+        if args.arch == 'host':
+            run('ctest', '--test-dir', str(build), '--output-on-failure')
+        binary = build / 'airmouse-hid'
+        if args.arch == 'arm64':
+            headers = run('aarch64-linux-gnu-readelf', '-l', '-d', str(binary), capture_output=True, text=True).stdout
+            if 'INTERP' in headers or '(NEEDED)' in headers:
+                raise SystemExit('ARM64 daemon must be statically linked')
+        bundle = work / 'bundle'
+        (bundle / 'bin').mkdir(parents=True)
+        shutil.copy2(binary, bundle / 'bin/airmouse-hid')
+        for relative in ['deploy/owned-bluetooth.sh', 'deploy/airmouse-bluetooth.service',
+                         'deploy/airmouse-bluetooth-rollback.service', 'deploy/airmouse-bluetooth-request.path',
+                         'deploy/airmouse-bluetooth-request.service', 'bluetooth/README.md']:
+            destination = bundle / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, destination)
+        for license in source.rglob('*'):
+            if license.is_file() and license.name.upper().startswith(('LICENSE', 'COPYING')):
+                destination = bundle / 'licenses/btstack' / license.relative_to(source)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(license, destination)
+        for relative in ['3rd-party/rijndael/rijndael.c', '3rd-party/rijndael/rijndael.h', '3rd-party/tinydir/tinydir.h']:
+            destination = bundle / 'licenses/btstack' / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / relative, destination)
+        license_paths = [pathlib.Path('/usr/share/doc/libc6-arm64-cross/copyright')]
+        license_paths += sorted(pathlib.Path('/usr/share/doc').glob('libgcc-*-dev-arm64-cross/copyright'))
+        license_paths += [pathlib.Path('/usr/share/common-licenses/LGPL-2.1'), pathlib.Path('/usr/share/common-licenses/GPL-3')]
+        for license in license_paths:
+            if license.is_file():
+                destination = bundle / 'licenses/toolchain' / (license.parent.name + '-' + license.name)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(license, destination)
+        manifest = {'btstack_commit': PIN, 'arch': args.arch,
+                    'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
+        (bundle / 'build.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        digest = hashlib.sha256()
+        files = sorted(p for p in bundle.rglob('*') if p.is_file())
+        for path in files:
+            digest.update(str(path.relative_to(bundle)).encode())
+            digest.update(path.read_bytes())
+        result = args.output_dir / f'airmouse-bluetooth-{args.arch}-{digest.hexdigest()[:16]}.tar.gz'
+        with result.open('wb') as destination, gzip.GzipFile(filename='', mode='wb', fileobj=destination, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode='w') as tar:
+                for path in files:
+                    info = tar.gettarinfo(str(path), arcname=str(path.relative_to(bundle)))
+                    info.uid = info.gid = info.mtime = 0
+                    info.uname = info.gname = ''
+                    # Modes come from the bundle contract, not the build host's umask: uccore must execute the daemon.
+                    info.mode = 0o755 if info.mode & 0o100 else 0o644
+                    with path.open('rb') as file:
+                        tar.addfile(info, file)
+        print(result.resolve())
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,37 @@
+MIT License
+
+Copyright (c) 2026 Medeni Baykal
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Scope. This license covers the original work in this repository except the
+parts listed below, which are derived from other projects and keep those
+projects' terms.
+
+- native/qml/AirMouseHost.qml, native/qml/Launcher.js, and the patches in
+  tools/airmouse-ui-build modify and extend the Unfolded Circle Remote UI and
+  are licensed under GPL-3.0-or-later. See native/LICENSE.
+- drivers/ contains modified Linux kernel modules licensed under GPL-2.0.
+  See drivers/LICENSES/GPL-2.0.
+- bluetooth/ links against BTstack, whose license permits redistribution and
+  use only for personal, noncommercial purposes. The MIT terms above apply to
+  the source in that directory, but a built daemon inherits BTstack's
+  restriction.

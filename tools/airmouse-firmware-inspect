@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Reproduce the static mouse-hold findings for the reviewed lab firmware. No device I/O."""
+import argparse
+import hashlib
+import json
+import pathlib
+import shutil
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('binary', type=pathlib.Path)
+args = parser.parse_args()
+digest = hashlib.sha256(args.binary.read_bytes()).hexdigest()
+expected = '8cc84d484e1fd30514d276d234c5e339c28ea92f4fda14fe75092d3263913930'
+if digest != expected:
+    parser.error('Unreviewed firmware hash; these findings cannot be applied to this binary')
+objdump = shutil.which('aarch64-linux-gnu-objdump')
+if not objdump:
+    parser.error('Install AArch64 binutils to reproduce the bounded disassembly')
+ranges = {
+    'hold_report_validation': (0x59aa0, 0x59adc),
+    'keyboard_hold_length': (0x59d6c, 0x59db0),
+    'mouse_report_id_and_native_queue_call': (0x58980, 0x589d8),
+    'native_queue_ignores_release_argument': (0x585b0, 0x58614),
+    'nonzero_report_schedules_release': (0x576ac, 0x57718),
+    'release_uses_zero_report_for_ids_1_through_4': (0x57aa0, 0x57b08),
+}
+evidence = {}
+for name, (start, stop) in ranges.items():
+    evidence[name] = subprocess.run([objdump, '-d', f'--start-address={start}', f'--stop-address={stop}', str(args.binary)], check=True, capture_output=True, text=True).stdout
+print(json.dumps({
+    'sha256': digest,
+    'method': 'Static disassembly of the exact reviewed executable; no live HID commands',
+    'reviewed_findings': {
+        'hold_report_lengths': {'1': 8, '2': 2, '3': 2},
+        'mouse_report_id': 4,
+        'mouse_hold_rejected': True,
+        'mouse_native_reports_automatically_release': True,
+        'independent_mouse_button_edges_implemented_in_airmouse': False,
+    },
+    'disassembly': evidence,
+}, indent=2))

@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Package and deploy the custom Remote UI through the supported Core installer."""
+import argparse
+import hashlib
+import io
+import json
+import pathlib
+import re
+import shlex
+import subprocess
+import tarfile
+
+root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('command', choices=['package', 'stage', 'status', 'install', 'rollback'])
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--accept-warranty', action='store_true', help='Explicitly accept the Core installer’s irreversible warranty consent record')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+if args.command == 'install' and not args.accept_warranty:
+    parser.error('Installation requires explicit warranty consent: --accept-warranty. Read native/README.md first.')
+ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', args.host]
+out = root / 'dist/native-ui'
+archive = out / 'airmouse-ui-0.1.0.tar.gz'
+
+def remote(*command, data=None):
+    return subprocess.run(ssh + [shlex.join(command)], input=data, check=True)
+
+if args.command == 'package':
+    binary = out / 'remote-ui'
+    header = binary.read_bytes()[:20]
+    if header[:5] != b'\x7fELF\x02' or int.from_bytes(header[18:20], 'little') != 183:
+        parser.error('Build the ARM64 UI with npm run build:native first')
+    metadata = json.loads((root / 'native/release.json').read_text())
+    with tarfile.open(archive, 'w:gz') as tar:
+        def add(name, content, mode=0o644):
+            info = tarfile.TarInfo(name)
+            info.size = len(content); info.mode = mode
+            tar.addfile(info, io.BytesIO(content))
+        add('release.json', (json.dumps(metadata, indent=2) + '\n').encode())
+        add('bin/remote-ui', binary.read_bytes(), 0o755)
+        add('data/LICENSE', (root / 'native/LICENSE').read_bytes())
+        add('data/airmouse-source.txt', b'Custom UI source: uc3-airmouse/native and tools/airmouse-ui-build\nUpstream: https://github.com/unfoldedcircle/remote-ui\nRevision: f3d34daea76239a92b5d43793f9eb849e5d0fc19\n')
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive.with_suffix(archive.suffix + '.sha256').write_text(f'{digest}  {archive.name}\n')
+    print(archive)
+    raise SystemExit
+
+if args.command in ['stage', 'install']:
+    content = archive.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    if not archive.with_suffix(archive.suffix + '.sha256').read_text().startswith(digest + ' '):
+        parser.error('Package checksum changed; rebuild the package')
+    stage = f'/mnt/data/airmouse/native-ui/{digest[:16]}'
+    remote('mkdir', '-p', '-m', '700', stage)
+    remote('sh', '-eu', '-c', f'cat > {shlex.quote(stage + "/ui.tar.gz")}', data=content)
+    remote('sh', '-eu', '-c', f'cd {shlex.quote(stage)}; sha256sum -c -', data=f'{digest}  ui.tar.gz\n'.encode())
+    print(f'Staged {stage}/ui.tar.gz', flush=True)
+    if args.command == 'stage':
+        raise SystemExit
+    remote('mkdir', '-p', '/etc/systemd/system/remote-ui-custom.service.d')
+    remote('sh', '-eu', '-c', 'cat > /etc/systemd/system/remote-ui-custom.service.d/airmouse.conf', data=(root / 'deploy/remote-ui-custom.conf').read_bytes())
+    remote('systemctl', 'daemon-reload')
+    action = f'''
+const form = new FormData();
+form.set('file', new Blob([fs.readFileSync({json.dumps(stage + '/ui.tar.gz')})]), 'airmouse-ui.tar.gz');
+await api('/system/install/ui?void_warranty=yes', {{method:'POST',body:form}});
+'''
+elif args.command == 'rollback':
+    action = "await api('/system/install/ui?enable=false', {method:'PUT'});"
+else:
+    action = "await api('/system/install/ui');"
+script = '''
+import fs from 'node:fs';
+const key=fs.readFileSync('/mnt/data/airmouse/state/core-api-key','utf8').trim();
+async function api(path, options={}) {
+ const response=await fetch('http://127.0.0.1/api'+path, {...options,headers:{Authorization:'Bearer '+key},signal:AbortSignal.timeout(180000)});
+ const body=await response.text();
+ if (!response.ok) throw new Error('Core HTTP '+response.status+': '+body);
+ console.log(body);
+}
+''' + action
+remote('node', '--input-type=module', data=script.encode())

@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Deploy every Air mouse component to the remote in one transaction-ordered pass.
+
+Order: Bluetooth rollback if a takeover is active, Bluetooth bundle install, Node
+service install, wait for the service to apply its Bluetooth ownership setting,
+native UI stage and activation, launcher placement, then verification. Each step uses
+the existing per-component tool so its rollback behavior is unchanged.
+"""
+import argparse
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+
+root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--skip-build', action='store_true', help='Use the archives already in dist/')
+parser.add_argument('--skip-bluetooth', action='store_true', help='Leave the installed Bluetooth daemon alone')
+parser.add_argument('--skip-ui', action='store_true', help='Leave the installed native UI alone')
+parser.add_argument('--probe', action='store_true', help='Run the controller probe after installing the Bluetooth bundle')
+parser.add_argument('--accept-warranty', action='store_true', help='Pass the Core installer warranty consent through to the UI install')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+if not args.skip_ui and not args.accept_warranty:
+    parser.error('UI activation requires --accept-warranty (read native/README.md) or --skip-ui')
+
+ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', args.host]
+steps = []
+
+def step(name, *command, capture=False, **kw):
+    print(f'==> {name}: {shlex.join(str(c) for c in command)}', flush=True)
+    result = subprocess.run([str(c) for c in command], cwd=root, check=True, capture_output=capture, text=True, **kw)
+    steps.append(name)
+    return result
+
+def remote(*command):
+    return subprocess.run(ssh + [shlex.join(command)], check=True, capture_output=True, text=True).stdout
+
+def tool(name):
+    return root / 'tools' / name
+
+takeover_active = 'Runtime takeover record present' in remote('sh', '/mnt/data/airmouse/bluetooth/owned-bluetooth.sh', 'status') if not args.skip_bluetooth else False
+print(f'Bluetooth takeover active before deploy: {takeover_active}', flush=True)
+
+bluetooth_archive = None
+if not args.skip_bluetooth:
+    if args.skip_build:
+        candidates = sorted((root / 'dist').glob('airmouse-bluetooth-arm64-*.tar.gz'), key=lambda p: p.stat().st_mtime)
+        if not candidates: sys.exit('No Bluetooth bundle in dist/; drop --skip-build')
+        bluetooth_archive = candidates[-1]
+    else:
+        out = step('build bluetooth', 'python3', tool('airmouse-bluetooth-build'), '--arch', 'arm64', '--btstack', '/tmp/uc3-airmouse-reference/btstack', capture=True)
+        bluetooth_archive = pathlib.Path(out.stdout.strip().splitlines()[-1])
+if not args.skip_ui and not args.skip_build:
+    step('build native ui', 'npm', 'run', 'build:native')
+    step('package native ui', 'python3', tool('airmouse-ui'), 'package')
+
+if not args.skip_bluetooth:
+    if takeover_active:
+        step('bluetooth rollback', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'rollback')
+    step('bluetooth install', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'install', '--archive', bluetooth_archive)
+    if args.probe:
+        step('bluetooth probe', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'probe')
+
+# The service tool builds its own archive so the release ID matches the tree it installs.
+step('service deploy', 'python3', tool('airmouse'), '--host', args.host, 'deploy')
+
+if not args.skip_bluetooth:
+    # The service applies bluetooth.ownership itself through the request watcher; wait for the result.
+    import json, time
+    ownership = json.loads(remote('cat', '/mnt/data/airmouse/state/airmouse.json')).get('bluetooth', {}).get('ownership', 'always')
+    print(f'==> bluetooth ownership setting: {ownership}', flush=True)
+    if ownership == 'always':
+        for attempt in range(40):
+            if 'Runtime takeover record present' in remote('sh', '/mnt/data/airmouse/bluetooth/owned-bluetooth.sh', 'status'): break
+            time.sleep(2)
+        else:
+            sys.exit('Service did not take over Bluetooth; see /run/airmouse/bluetooth-request.failed on the device')
+        steps.append('bluetooth ownership')
+
+if not args.skip_ui:
+    step('ui stage', 'python3', tool('airmouse-ui'), '--host', args.host, 'stage')
+    step('launcher prepare', 'python3', tool('airmouse-home'), '--host', args.host, 'prepare')
+    step('ui install', 'python3', tool('airmouse-ui'), '--host', args.host, 'install', '--accept-warranty')
+    step('launcher apply', 'python3', tool('airmouse-home'), '--host', args.host, 'apply')
+    step('launcher verify', 'python3', tool('airmouse-home'), '--host', args.host, 'verify')
+
+step('verify', 'python3', tool('airmouse'), '--host', args.host, 'verify')
+step('service status', 'python3', tool('airmouse'), '--host', args.host, 'status')
+if not args.skip_bluetooth:
+    step('bluetooth status', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'status')
+print('Deployed: ' + ', '.join(steps), flush=True)

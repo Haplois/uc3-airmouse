@@ -1,4 +1,13 @@
 __pycache__/
 *.pyc
-bin/
-obj/
+node_modules/
+dist/
+*.jsonl
+drivers/**/*.o
+drivers/**/*.ko
+drivers/**/*.mod
+drivers/**/*.mod.c
+drivers/**/.*.cmd
+drivers/**/.*.o.d
+drivers/**/Module.symvers
+drivers/**/modules.order

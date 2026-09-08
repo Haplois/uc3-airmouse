@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Watch Core power mode and Air mouse pointer state during hand-driven power tests.
+
+Prints one line whenever the power mode, pointer, pointer intent, stop reason,
+control connection, or sensor journal presence changes. Reads only; sends no input.
+Stop with Ctrl-C.
+"""
+import argparse
+import re
+import shlex
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--interval', type=float, default=0.5)
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8', args.host]
+script = f'''
+key=$(cat /mnt/data/airmouse/state/core-api-key); last=
+while true; do
+  power=$(curl -s -m 2 -H "Authorization: Bearer $key" http://127.0.0.1/api/system/power | sed -n 's/.*"mode":"\\([A-Z_]*\\)".*/\\1/p')
+  s=$(cat /mnt/data/airmouse/state/status.json 2>/dev/null)
+  pointer=$(printf %s "$s" | sed -n 's/.*"pointer":\\(true\\|false\\).*/\\1/p')
+  intent=$(printf %s "$s" | sed -n 's/.*"pointer_enabled":\\(true\\|false\\).*/\\1/p')
+  reason=$(printf %s "$s" | sed -n 's/.*"stop_reason":"\\([^"]*\\)".*/\\1/p')
+  control=$(printf %s "$s" | sed -n 's/.*"control_connected":\\(true\\|false\\).*/\\1/p')
+  ready=$(printf %s "$s" | sed -n 's/.*"ready":\\(true\\|false\\).*/\\1/p')
+  applied=$(printf %s "$s" | sed -n 's/.*"applied_sampling":\\([0-9a-z]*\\).*/\\1/p')
+  if test -f /mnt/data/airmouse/state/sensor-journal.json; then journal=held; else journal=restored; fi
+  line="power=$power pointer=$pointer intent=$intent control=$control ready=$ready sampling=$applied sensor=$journal reason=$reason"
+  if test "$line" != "$last"; then printf '%s %s\\n' "$(date +%H:%M:%S)" "$line"; last=$line; fi
+  sleep {args.interval}
+done
+'''
+try:
+    subprocess.run(ssh + ['sh', '-c', shlex.quote(script)], check=False)
+except KeyboardInterrupt:
+    pass

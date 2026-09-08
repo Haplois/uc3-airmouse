@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Capture the physical Remote 3 display without sending input."""
+import argparse
+import json
+import pathlib
+import re
+import shlex
+import subprocess
+import uuid
+
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host',default='root@10.0.10.51')
+parser.add_argument('--output',type=pathlib.Path,required=True)
+args=parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*',args.host):parser.error('Expected user@host')
+if args.output.exists():parser.error('Output file already exists')
+ssh=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',args.host]
+def remote(*cmd,**kwargs):
+    return subprocess.run(ssh+[shlex.join(cmd)],check=True,timeout=20,**kwargs)
+config=json.loads(remote('cat','/etc/qt5/eglfs_kms_cfg.json',capture_output=True).stdout)
+device=config['device']
+if not re.fullmatch(r'/dev/dri/card\d+',device):parser.error('Unexpected DRM device path')
+temporary=f'/tmp/airmouse-screen-{uuid.uuid4().hex}.png'
+try:
+    remote('ffmpeg','-hide_banner','-loglevel','error','-device',device,'-f','kmsgrab','-i','-','-vf','hwdownload,format=bgr0','-frames:v','1',temporary)
+    image=remote('cat',temporary,capture_output=True).stdout
+    if not image.startswith(b'\x89PNG\r\n\x1a\n'):raise RuntimeError('Capture did not return a PNG')
+    args.output.parent.mkdir(parents=True,exist_ok=True)
+    with args.output.open('xb') as file:file.write(image)
+    print(args.output)
+finally:
+    remote('rm','-f',temporary)
