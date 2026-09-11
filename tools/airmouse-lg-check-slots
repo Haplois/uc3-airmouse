@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Run the reviewed TV's remote-slot handler offline with a simulated device database."""
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import struct
+
+
+REVIEWED_SHA256 = 'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b'
+CANDIDATES = (
+    'LGE MR23', 'LGE MR24', 'LGE MR24N', 'LGE MR25GA', 'LGE MR25GB',
+    'LGE MR25JP', 'LGE MR25LA', 'LGE MR26GA', 'LGE SP16',
+)
+PRIMARY = b'AA:BB:CC:DD:EE:FF'
+CANDIDATE = b'11:22:33:44:55:66'
+
+
+def check_slot(data, name, slot, policy='stock', dual_enabled=False):
+    from elftools.elf.elffile import ELFFile
+    from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE
+    from unicorn.arm_const import (
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC,
+    )
+
+    elf = ELFFile(io.BytesIO(data))
+    machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    machine.mem_map(0, 0x200000)
+    machine.mem_map(0x300000, 0x20000)
+    for segment in elf.iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            machine.mem_write(segment['p_vaddr'], segment.data())
+
+    name_address, peer_address, stop = 0x310000, 0x310100, 0x31f000
+    machine.mem_write(name_address, name.encode('ascii') + b'\0')
+    machine.mem_write(peer_address, CANDIDATE + b'\0')
+    machine.reg_write(UC_ARM_REG_SP, 0x30fff0)
+    machine.reg_write(UC_ARM_REG_LR, stop | 1)
+    machine.reg_write(UC_ARM_REG_R0, name_address)
+    machine.reg_write(UC_ARM_REG_R1, peer_address)
+    machine.mem_write(0xd65e4, struct.pack('<I', int(dual_enabled)))
+    database = {0: PRIMARY, slot: CANDIDATE}
+    before = database.copy()
+    writes = []
+
+    def cstring(address):
+        result = bytearray()
+        for offset in range(512):
+            byte = machine.mem_read(address + offset, 1)[0]
+            if byte == 0:
+                return bytes(result)
+            result.append(byte)
+        raise ValueError('Unterminated string in simulated memory')
+
+    def return_from_call(value=0):
+        machine.reg_write(UC_ARM_REG_R0, value & 0xffffffff)
+        machine.reg_write(UC_ARM_REG_PC, machine.reg_read(UC_ARM_REG_LR))
+
+    def instruction_hook(_machine, address, _size, _context):
+        if address == stop:
+            machine.emu_stop()
+            return
+        if policy == 'preserve-secondary' and dual_enabled and slot == 1 and address == 0x62f92:
+            # Local policy experiment: retain the known paired slot and use the common lookup.
+            # This changes only emulator execution, never a binary file or the TV.
+            machine.reg_write(UC_ARM_REG_PC, 0x62f47)
+            return
+        r0, r1, r2, _r3 = [machine.reg_read(register) for register in
+                           (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3)]
+        if address == 0x72b20:  # lginput_db_getPairedDeviceIndex
+            return_from_call(slot)
+        elif address in (0x60a74, 0x1d5e0):  # strcmp wrapper and PLT
+            left, right = cstring(r0), cstring(r1)
+            return_from_call((left > right) - (left < right))
+        elif address == 0x60c48:  # strstr wrapper
+            offset = cstring(r0).find(cstring(r1))
+            return_from_call(0 if offset < 0 else r0 + offset)
+        elif address == 0x72c88:  # No Tone accessory in the simulated database
+            return_from_call(0x310200)
+        elif address == 0x1d370:  # memset
+            if r2 > 0x260:
+                raise ValueError('Unexpected simulated memset size')
+            machine.mem_write(r0, bytes([r1 & 255]) * r2)
+            return_from_call(r0)
+        elif address == 0x728dc:  # lginput_db_getDevInfo
+            machine.mem_write(r0, bytes(0x260))
+            machine.mem_write(r0 + 0xfb, database.get(r1, b'') + b'\0')
+            return_from_call(1)
+        elif address == 0x60ba4:  # strlen wrapper
+            return_from_call(len(cstring(r0)))
+        elif address == 0x5fdd8:  # lowercase wrapper
+            machine.mem_write(r2, cstring(r0).lower() + b'\0')
+            return_from_call(r2)
+        elif address == 0x73634:  # lginput_db_setDevInfo, recorded in memory only
+            database[r0] = cstring(r2).upper()
+            writes.append(r0)
+            return_from_call(1)
+        elif address in (0x70b48, 0x72734, 0x72a3c, 0x75988, 0x6e4fc):
+            # Persistence, cached calibration, connection bookkeeping, reload, logging.
+            return_from_call(1)
+        elif not any(start <= address < end for start, end in (
+            (0x62f18, 0x63170),  # _uhid_check_mrcu_dev_index
+            (0x5c5ec, 0x5c734),  # lginput_util_isMagicRemote
+            (0x5c734, 0x5c82c),  # lginput_util_isBleRemote
+            (0x5dbf0, 0x5dbfa),  # lginput_util_getDualPairingMode
+            (0xb959c, 0xb95c4),  # Optional, independently built slot repair
+        )):
+            raise ValueError(f'Unexpected call outside reviewed functions: {address:#x}')
+
+    machine.hook_add(UC_HOOK_CODE, instruction_hook)
+    machine.emu_start(0x62f19, stop, count=20000)
+    if machine.reg_read(UC_ARM_REG_PC) != stop:
+        raise ValueError('Reviewed function did not return within the instruction budget')
+    selected = struct.unpack('<I', machine.mem_read(0xbc37c, 4))[0]
+    return {
+        'name': name, 'requested_slot': slot, 'selected_slot': selected,
+        'database_write_slots': writes,
+        'primary_preserved': database[0] == before[0],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--check', type=Path, help='Compare with the saved observed results')
+    parser.add_argument('--require-dual', action='store_true',
+                        help='Fail if any candidate loses its requested second slot')
+    parser.add_argument('--policy', choices=('stock', 'preserve-secondary'), default='stock',
+                        help='Offline slot-policy experiment; never writes firmware')
+    args = parser.parse_args()
+    try:
+        data = args.binary.read_bytes()
+        if hashlib.sha256(data).hexdigest() != REVIEWED_SHA256:
+            raise ValueError('Unreviewed firmware hash')
+        rows = [check_slot(data, name, slot, args.policy, dual_enabled=True)
+                for name in CANDIDATES for slot in (0, 1)]
+        result = {
+            'sha256': REVIEWED_SHA256,
+            'policy': args.policy,
+            'scope': 'Reviewed slot and family functions; simulated database and helper calls',
+            'limits': 'Does not test discovery, Bluetooth, key dispatch, motion, or persistence',
+            'results': rows,
+        }
+        if args.policy != 'stock':
+            result['disabled_mode_matches_stock'] = all(
+                check_slot(data, name, 1, args.policy, dual_enabled=False) == check_slot(data, name, 1)
+                for name in CANDIDATES)
+            if not result['disabled_mode_matches_stock']:
+                raise ValueError('Prototype changed behavior when dual mode is disabled')
+        if args.check:
+            if json.loads(args.check.read_text()) != result:
+                raise ValueError('Slot results differ from the saved results')
+            print('Reviewed LG slot results match')
+        else:
+            print(json.dumps(result, indent=2))
+        if args.require_dual and any(row['requested_slot'] == 1 and
+                                    (row['selected_slot'] != 1 or not row['primary_preserved'])
+                                    for row in rows):
+            parser.exit(1, 'Dual-slot check failed: a candidate overwrites the primary slot\n')
+    except ImportError:
+        parser.exit(1, 'Install pyelftools and unicorn in an analysis virtual environment\n')
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'{error}\n')
+
+
+if __name__ == '__main__':
+    main()

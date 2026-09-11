@@ -12,8 +12,6 @@ TestCase {
         property bool connected: true
         property bool busy: false
         property var commands: []
-        signal changed()
-        onConnectedChanged: changed()
         signal failed(string message)
         signal commandSucceeded(string type)
         function command(value) { commands.push(value); }
@@ -25,6 +23,120 @@ TestCase {
         bridge.snapshot = state;
     }
     function init() { bridge.connected=true; bridge.busy=false; page.releaseButtons(); update({swap_click_buttons:false,core_connected:true,bluetooth_ownership:"always",ownership_status:"",target:"a",button_edges:true,bluetooth_backend:"owned",paired:true,pointer:false,pointer_enabled:false,switching:false,ready:true,theme:"black",output_rate:500,stop_reason:"Pointer off",calibrating:false,error:""}); bridge.commands=[]; page.screenPage="mouse"; wait(20); }
+    function test_lg_navigation_while_paused() {
+        update({target_profile:"lg-tv"});
+        try {
+            page.remoteHome(); page.remoteBack(); page.buttonPressed(1); page.buttonReleased(1);
+            compare(bridge.commands, [{type:"key",key:"home"},{type:"key",key:"back"},{type:"key",key:"ok"}]);
+            page.buttonPressed(2, true); page.buttonReleased(2, true);
+            compare(bridge.commands[3], {type:"key",key:"back"});
+        } finally { update({target_profile:""}); }
+    }
+    function test_lg_footer_has_app_and_steam_shortcuts_instead_of_back_and_ok() {
+        update({target_profile:"lg-tv",pointer:true});
+        try {
+            wait(20);
+            compare(findChild(page,"leftClickButton"),null);
+            compare(findChild(page,"rightClickButton"),null);
+            var names=["netflix","youtube","steam_machine"];
+            for (var i=0;i<names.length;i++) {
+                var shortcut=findChild(page,names[i]+"Shortcut");
+                verify(shortcut!==null); verify(shortcut.enabled);
+                compare(shortcut.text, "");
+                compare(shortcut.focusPolicy, Qt.NoFocus);
+                var logo=findChild(shortcut,names[i]+"Logo");
+                verify(logo!==null);
+                tryCompare(logo,"status",Image.Ready);
+                shortcut.forceActiveFocus();
+                compare(shortcut.background.border.width,0);
+                mouseClick(shortcut);
+            }
+            compare(findChild(page,"steam_machineLogo").source.toString().split("/").pop(),"steam_machine.svg");
+            compare(bridge.commands,[{type:"key",key:"netflix"},{type:"key",key:"youtube"},{type:"key",key:"steam_machine"}]);
+            grabImage(page).save("/tmp/native-lg-shortcuts.png");
+            update({ready:false});
+            verify(!findChild(page,"netflixShortcut").enabled);
+        } finally { update({target_profile:""}); }
+    }
+    function test_lg_command_pending_does_not_change_rendered_page() {
+        update({target_profile:"lg-tv",pointer:true});
+        try {
+            var logo=findChild(page,"netflixLogo");
+            tryCompare(logo,"status",Image.Ready);
+            wait(20);
+            var before=grabImage(page);
+            bridge.busy=true;
+            wait(20);
+            var pending=grabImage(page);
+            verify(before.equals(pending),"A pending TV command changed visible pixels");
+        } finally {
+            bridge.busy=false;
+            update({target_profile:""});
+        }
+    }
+    function test_lg_pointer_starts_on_connect_and_return_from_settings() {
+        update({target_profile:"lg-tv",ready:false});
+        wait(150); compare(bridge.commands.length,0);
+        update({ready:true}); wait(150);
+        compare(bridge.commands,[{type:"on"}]);
+        update({pointer:true}); page.toggle();
+        compare(bridge.commands.length,1);
+        page.navigate("settings"); update({pointer:false}); bridge.commands=[];
+        wait(150); compare(bridge.commands.length,0);
+        page.navigate("mouse"); wait(150);
+        compare(bridge.commands,[{type:"on"}]);
+        update({target_profile:""});
+    }
+    function test_physical_input_while_disconnected_requests_reconnect() {
+        update({ready:false});
+        page.buttonPressed(1); page.buttonReleased(1);
+        compare(bridge.commands,[{type:"reconnect"}]);
+        verify(page.notice.indexOf("Reconnecting to Desktop")===0);
+        page.toggle(); page.media("mute"); page.direction("up");
+        compare(bridge.commands.length,4);
+        for (var i=0;i<4;i++) compare(bridge.commands[i].type,"reconnect");
+        compare(page.statusText(),"Not connected · press a key or shake to reconnect");
+        update({reconnecting:true}); compare(page.statusText(),"Reconnecting · press any key or shake to retry");
+        bridge.commands=[]; update({ready:true,reconnecting:false});
+        page.direction("up"); compare(bridge.commands,[{type:"key",key:"up"}]);
+        bridge.commands=[]; update({ready:false,pairing:true});
+        page.buttonPressed(2); page.buttonReleased(2); compare(bridge.commands.length,0);
+        update({pairing:false});
+    }
+    function test_lg_physical_input_while_disconnected_reconnects_but_power_wakes() {
+        update({target_profile:"lg-tv",ready:false});
+        page.remoteHome(); page.remoteBack(); page.buttonPressed(1); page.buttonReleased(1);
+        for (var i=0;i<3;i++) compare(bridge.commands[i].type,"reconnect");
+        page.remotePower(); compare(bridge.commands[3],{type:"power"});
+        compare(page.statusText(),"TV not connected · press a key or shake, Power turns it on");
+        update({target_profile:""});
+    }
+    function test_lg_power_works_when_tv_is_disconnected() {
+        update({target_profile:"lg-tv",ready:false});
+        page.remotePower(); compare(bridge.commands,[{type:"power"}]);
+        bridge.commands=[]; update({ready:true,pointer:true});
+        page.remotePower(); compare(bridge.commands,[{type:"power"}]);
+        update({target_profile:""});
+    }
+    function test_lg_pointer_respects_suspended_session_and_errors() {
+        update({target_profile:"lg-tv"}); page.pointerSessionActive=false;
+        wait(150); compare(bridge.commands.length,0);
+        page.pointerSessionActive=true; update({error:"Sensor unavailable"});
+        wait(150); compare(bridge.commands.length,0);
+        update({error:""}); wait(150); compare(bridge.commands,[{type:"on"}]);
+        update({target_profile:""});
+    }
+    function test_lg_pointer_click_and_back() {
+        update({target_profile:"lg-tv",pointer:true});
+        try {
+            page.buttonPressed(1); page.buttonReleased(1);
+            page.buttonPressed(2); page.buttonReleased(2);
+            compare(bridge.commands, [{type:"button",button:1,down:true},{type:"button",button:1,down:false},{type:"key",key:"back"}]);
+            bridge.commands=[]; page.navigate("settings"); update({pointer:false}); bridge.commands=[];
+            page.remoteBack(); compare(page.screenPage,"mouse"); compare(bridge.commands.length,0);
+            bridge.busy=true; page.remoteHome(); compare(bridge.commands.length,0);
+        } finally { update({target_profile:""}); }
+    }
     function test_button_edges_during_busy() {
         update({pointer:true}); bridge.busy=true;
         page.buttonPressed(1); page.buttonPressed(1); page.buttonPressed(2);
@@ -214,6 +326,41 @@ TestCase {
         page.endScroll();var count=bridge.commands.length;wait(80);compare(bridge.commands.length,count);
         page.beginScroll();page.scroll(-0.2);bridge.connected=false;wait(80);
         compare(page.touching,false);compare(page.wheelFraction,0);compare(bridge.commands.length,count);
+    }
+    function test_reconnect_keeps_tv_context_and_reports_prolonged_failure() {
+        update({target:"a",target_name:"LG TV",target_profile:"lg-tv",pointer:false,pointer_enabled:false,ready:false,core_connected:false});
+        bridge.connected=false;
+        compare(page.statusText(),"Reconnecting…");
+        verify(page.lgTV);
+        verify(!findChild(page,"monitorButton").enabled);
+        page.remoteBack(); page.remoteHome(); page.direction("up");
+        compare(bridge.commands.length,0);
+        compare(page.screenPage,"mouse");
+        tryCompare(page,"reconnectExpired",true,5500);
+        compare(page.statusText(),"Air mouse service unavailable");
+        bridge.connected=true;
+        compare(page.statusText(),"Bluetooth service unavailable");
+        verify(!findChild(page,"allDevicesButton").enabled);
+        verify(!findChild(page,"quickTarget0").enabled);
+        update({core_connected:true,ready:true});
+        verify(!page.reconnecting);
+        verify(!page.reconnectExpired);
+        tryCompare(page,"automaticStartRequested",true);
+        compare(bridge.commands,[{type:"on"}]);
+        update({target_profile:"computer"});
+    }
+    function test_initial_connection_does_not_claim_no_pairings() {
+        var previous = bridge.snapshot;
+        bridge.snapshot=({theme:"black",targets:[],target:"",target_name:"",core_connected:false});
+        bridge.connected=false;
+        compare(findChild(page,"targetName").text,"Connecting…");
+        compare(findChild(page,"emptyTargets").text,"Loading devices…");
+        bridge.connected=true;
+        compare(findChild(page,"targetName").text,"Connecting…");
+        update({core_connected:true});
+        compare(findChild(page,"targetName").text,"Choose a computer");
+        verify(findChild(page,"emptyTargets").text.indexOf("No paired")===0);
+        bridge.snapshot=previous;
     }
     function test_settings_pause() {
         update({pointer:true});page.navigate("settings");

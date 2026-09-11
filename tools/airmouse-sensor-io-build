@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Build the event-driven IIO/evdev adapter, using Node's stable C ABI."""
+import argparse
+from pathlib import Path
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--arch', choices=['arm64', 'host'], default='arm64')
+args = parser.parse_args()
+root = Path(__file__).resolve().parents[1]
+output = root / 'dist' / ('sensor-io-' + args.arch + '.node')
+output.parent.mkdir(exist_ok=True)
+compiler = 'aarch64-linux-gnu-gcc' if args.arch == 'arm64' else 'cc'
+subprocess.run([compiler, '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
+                '-I/usr/include/node', '-o', str(output), str(root / 'runtime/native/sensor_io.c')], check=True)
+print(output)

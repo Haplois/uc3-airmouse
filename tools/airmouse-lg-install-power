@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Add a power-key handler to an already installed LG receiver startup hook."""
+import argparse
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='TV SSH destination')
+    parser.add_argument('--remote-bluetooth-address', required=True)
+    parser.add_argument('--update', action='store_true', help='Update the existing TV key handler')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', args.remote_bluetooth_address):
+        parser.error('Expected the paired Remote 3 Bluetooth MAC address')
+    root = '/var/lib/webosbrew/airmouse-lg-receiver'
+    local = Path(__file__).with_name('lib')
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv = deploy['TV'](args.host)
+    try:
+        pid = tv.health()
+        tv.ssh(f'test -f {root}/startup.py && test ! -e {root}/disabled')
+        if args.update:
+            previous = json.loads(tv.ssh(f'cat {root}/power.json'))
+            if previous.get('bluetooth_address') != args.remote_bluetooth_address.lower():
+                raise ValueError('Existing key handler belongs to a different remote')
+        else:
+            tv.ssh(f'test ! -e {root}/startup.py.before-power && cp -p {root}/startup.py {root}/startup.py.before-power')
+        files = {'startup.py': (local / 'lg_receiver_startup.py').read_bytes(),
+                 'power-key.py': (local / 'lg_power_key.py').read_bytes(),
+                 'cec.py': (local / 'lg_cec.py').read_bytes(),
+                 'power.json': json.dumps({'bluetooth_address': args.remote_bluetooth_address.lower()}).encode()}
+        for name, contents in files.items():
+            tv.ssh(f'umask 077; cat > {root}/{name}.new && mv {root}/{name}.new {root}/{name}', data=contents)
+        tv.ssh(f'/usr/bin/python3 -m py_compile {root}/startup.py {root}/power-key.py {root}/cec.py')
+        print(tv.ssh(f'/usr/bin/python3 {root}/startup.py boot'))
+        if args.update:
+            tv.ssh('systemctl restart airmouse-lg-power.service')
+        tv.ssh('systemctl is-active airmouse-lg-power.service')
+        if tv.health() != pid:
+            raise ValueError('Receiver restarted during power handler installation')
+        tv.ssh('sync')
+        print('Persistent power-key handler installed; receiver process retained.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Power handler installation failed: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

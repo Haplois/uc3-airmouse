@@ -1,6 +1,7 @@
 [Unit]
 Description=Remote 3 air mouse
-After=remote-core.service
+Wants=dev-input-airmouse\x2dwake.device
+After=remote-core.service dev-input-airmouse\x2dwake.device
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
@@ -8,7 +9,7 @@ StartLimitBurst=3
 Type=simple
 User=airmouse
 Group=airmouse
-SupplementaryGroups=systemd-journal
+SupplementaryGroups=systemd-journal input
 WorkingDirectory=/mnt/data/airmouse/current
 Environment=AIRMOUSE_STATE=/mnt/data/airmouse/state
 RuntimeDirectory=airmouse

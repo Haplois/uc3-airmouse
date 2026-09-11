@@ -239,14 +239,14 @@ saved computers still needs testing. Prefer selecting among existing connections
 when possible, while sending air mouse input only to the selected target. Do not
 promise a switch time before testing.
 
-The first output is standard Bluetooth HID for Windows and Linux. Test both desktop use and Steam's interface. LG can first use the same backend if the actual TV accepts HID mouse input. Keep its key mappings and supported actions in its target profile.
-
-A full LG remote replacement is deferred. Generic mouse support does not prove
-Magic Remote pairing, voice, power-on, or all navigation commands. UC reports a
-working keyboard and mouse on OLED77CX6LA, with a Back-key limitation; Bluetooth
-power-on is also listed as unsupported. The user deferred model-specific LG
-investigation. Any later supported LG network protocol would run on the remote
-and remain separate from motion processing.
+The computer profile uses standard Bluetooth HID for Windows and Linux.
+The [LG TV profile](../lg-tv.md) uses the observed MR23 Bluetooth LE identity,
+GATT map, native key codes, motion reports, and control responses. The lab TV
+identifies itself as OLED77G3PSA. Packet and lifecycle tests pass; fresh pairing
+and pointer behavior still need validation on that TV. Profile changes happen
+while disconnected, and existing TV connections require fresh pairing. Voice,
+IR, and TV power-on are outside the implemented protocol. The profile uses
+Bluetooth only.
 
 ## Why this design
 

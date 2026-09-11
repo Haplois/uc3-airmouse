@@ -30,6 +30,13 @@ switch deadline in `Controller.switchTimeoutMs` cancels a pending resume. The UI
 choice separately from active output and shows **Connecting** while reports are
 paused.
 
+While the selected computer is saved but not connected, every physical key,
+OK, Right, the media keys and Power ask the service to reconnect instead of
+being dropped, and the status line says so. Shaking the remote does the same
+without a press. On an LG TV, Power still sends the network wake packet as
+well, so a TV that is off turns on and a TV that is merely out of range picks
+the remote back up.
+
 Tapping the selected quick-switch computer stops input and disconnects Bluetooth.
 The saved pairing remains available, and tapping the computer again reconnects it
 with pointing paused. Disconnect requires the owned backend's device management.
@@ -80,19 +87,13 @@ stale completion cannot turn the pointer back on. The controller restores the
 sensor state through its normal stop path. Scroll accumulation is bounded and
 discarded on release or disconnect.
 
-`AirMouseHost.qml` decides what each power mode does. Idle, which is display off, never closes
-the app; it releases held buttons and keeps an enabled pointer running. Firmware
-2.10.2 normally cannot reach this state while pointing. The sensor driver
-reports a wake key on every FIFO interrupt and Core counts each one as activity,
-so the remote does not reach Idle while pointing. See
-[verification](../verification.md#power-transitions-on-2026-09-08). Low power
-and Suspend send OFF with the reason "Paused for standby" and keep the app open
-when the sleep began with pointing enabled; otherwise they close the paused app.
-The service's 60-second idle timeout is a separate mechanism. It pauses pointing
-when the remote is motionless. Pointing is usually paused by the time the
-60-second display-off timer expires. Device tests on 2026-09-08 confirmed that
-standby while paused closes the app and that display-off transitions are
-reported.
+`AirMouseHost.qml` keeps an owned Bluetooth pointer available through Idle
+and Low power. Idle dims the screen; Low power switches it off. Suspend sends
+OFF and retains an LG session or a previously enabled pointer. The main window
+reopens the retained Air mouse popup and restores navigation ownership on wake.
+The sensor reader suppresses false firmware wake events while acquisition runs.
+LG rest preserves pointer intent, so automatic start does not undo rest. The
+full policy and hardware checks are in [power saving](../power-saving.md).
 
 ## Verification on 2026-09-07
 

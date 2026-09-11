@@ -40,6 +40,7 @@ if args.command in ['build', 'deploy']:
         remote('mkdir', '-p', f'{base}/releases/{release}')
         remote('tar', '-x', '-f', '-', '-C', f'{base}/releases/{release}', data=gzip.decompress(archive.read_bytes()))
         remote('sh', f'{base}/releases/{release}/deploy/install.sh', release)
+        subprocess.run(['python3', str(root / 'tools/airmouse-install-sleep'), '--host', args.host], check=True)
 elif args.command == 'status':
     remote('systemctl', 'status', 'airmouse.service', '--no-pager')
     remote('cat', f'{base}/state/status.json')
@@ -73,6 +74,10 @@ systemctl disable --now airmouse.service
 test ! -f {base}/state/sensor-journal.json
 node "$helper" restore
 rm -f /etc/systemd/system/airmouse.service.d/sensor.conf
+rm -f /etc/udev/rules.d/99-airmouse-wake.rules
+udevadm control --reload-rules
+udevadm trigger --action=add --subsystem-match=input
+udevadm settle
 echo 'Air mouse disabled; sensor settings and permissions restored. Files and API key retained.'
 ''')
 elif args.command in ['provision', 'targets']:
@@ -93,7 +98,7 @@ elif args.command == 'record':
     remote('systemctl', 'stop', 'airmouse.service')
     try:
         capture = [f'{base}/state/last-recording.jsonl'] if args.output else []
-        remote('systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-record', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'RuntimeDirectory=airmouse', '-p', f'ExecStopPost=/usr/bin/node {base}/current/runtime/main.mjs recover', '-E', f'AIRMOUSE_STATE={base}/state', '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock', '/usr/bin/node', f'{base}/current/runtime/record.mjs', f'{base}/state', str(args.rate), str(args.seconds), 'keep-range' if args.keep_range else str(args.gyro_range), *capture)
+        remote('systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-record', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'SupplementaryGroups=input', '-p', 'RuntimeDirectory=airmouse', '-p', f'ExecStopPost=/usr/bin/node {base}/current/runtime/main.mjs recover', '-E', f'AIRMOUSE_STATE={base}/state', '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock', '/usr/bin/node', f'{base}/current/runtime/record.mjs', f'{base}/state', str(args.rate), str(args.seconds), 'keep-range' if args.keep_range else str(args.gyro_range), *capture)
         if args.output:
             with args.output.open('xb') as output:
                 subprocess.run(ssh + [shlex.join(['cat', capture[0]])], stdout=output, check=True)

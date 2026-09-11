@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Extract reviewed LG interoperability tables from a local lginput2 ELF. No device I/O."""
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import struct
+
+
+REVIEWED_SHA256 = 'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b'
+
+
+def extract(data):
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != REVIEWED_SHA256:
+        raise ValueError('Unreviewed firmware hash; this map cannot be applied to this binary')
+    from elftools.elf.elffile import ELFFile
+    from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
+
+    elf = ELFFile(io.BytesIO(data))
+    if elf['e_machine'] != 'EM_ARM' or elf.elfclass != 32 or not elf.little_endian:
+        raise ValueError('Expected the reviewed little-endian ARM32 ELF')
+    sections = [s for s in elf.iter_sections()
+                if s['sh_flags'] & 2 and s['sh_type'] != 'SHT_NOBITS']
+    symbols = {s.name: s for s in elf.get_section_by_name('.dynsym').iter_symbols()}
+    names = {s['st_value']: s.name for s in symbols.values() if s['st_value']}
+
+    def read(address, length):
+        for section in sections:
+            offset = address - section['sh_addr']
+            if 0 <= offset and offset + length <= section['sh_size']:
+                return section.data()[offset:offset + length]
+        raise ValueError(f'Address outside file-backed allocated sections: {address:#x}')
+
+    def string(address):
+        value = bytearray()
+        for offset in range(128):
+            byte = read(address + offset, 1)[0]
+            if byte == 0:
+                return value.decode('ascii')
+            if not 32 <= byte < 127:
+                raise ValueError(f'Non-text table entry at {address:#x}')
+            value.append(byte)
+        raise ValueError('Unterminated table string')
+
+    def table(name, expected_size, pointer_name):
+        symbol = symbols[name]
+        if symbol['st_size'] != expected_size:
+            raise ValueError(f'Unexpected table size: {name}')
+        start = symbol['st_value']
+        rows = []
+        for offset in range(0, expected_size, 8):
+            command, pointer = struct.unpack('<II', read(start + offset, 8))
+            rows.append({'entry': hex(start + offset), 'command': f'0x{command:02x}',
+                         pointer_name: names[pointer] if pointer_name == 'handler' else string(pointer)})
+        return rows
+
+    disassembler = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
+
+    def instruction(address, mnemonic, operands):
+        decoded = next(disassembler.disasm(read(address, 4), address), None)
+        if decoded is None or (decoded.mnemonic, decoded.op_str) != (mnemonic, operands):
+            raise ValueError(f'Reviewed instruction differs at {address:#x}')
+        return {'address': hex(address), 'instruction': f'{mnemonic} {operands}'}
+
+    # These checks cover normal report framing and the existing service's second-slot path.
+    evidence = {
+        'dual_pairing_handler_calls_interface': instruction(0x21296, 'bl', '#0x80ab8'),
+        'dual_pairing_command_calls_setter': instruction(0x55f0e, 'bl', '#0x5dc20'),
+        'supported_remote_checks_dual_mode': instruction(0x408f0, 'bl', '#0x5dbf0'),
+        'dual_mode_selects_second_slot': instruction(0x408fa, 'movs', 'r2, #1'),
+        'dual_mode_stores_slot': instruction(0x408fe, 'str.w', 'r2, [r3, #0x108]'),
+        'pairing_reads_selected_slot': instruction(0x4467e, 'ldr.w', 'r1, [fp, #0x108]'),
+        'pairing_looks_up_selected_device': instruction(0x44684, 'bl', '#0x728dc'),
+        'ble_connection_checks_primary_slot': instruction(0x62f92, 'cmp', 'r6, #0'),
+        'ble_secondary_enters_db_repair': instruction(0x62f94, 'bne', '#0x63074'),
+        'ble_db_repair_selects_primary': instruction(0x630cc, 'mov', 'r0, sb'),
+        'ble_db_repair_stores_device': instruction(0x630d2, 'bl', '#0x73634'),
+        'ble_db_repair_returns_primary_slot': instruction(0x630f8, 'b', '#0x62f96'),
+        'no_payload_output_report': instruction(0x6845c, 'movs', 'r3, #0xf9'),
+        'no_payload_output_length': instruction(0x6845e, 'movs', 'r2, #2'),
+        'response_command_offset': instruction(0x6564c, 'ldrb', 'r0, [r3, #1]'),
+        'response_dispatch_table_length': instruction(0x65656, 'cmp', 'r1, #0x1b'),
+        'voice_payload_length': instruction(0x4e8be, 'cmp', 'r1, #0x78'),
+        'device_allocates_own_state': instruction(0x52624, 'str', 'r0, [r4, #0x5c]'),
+        'device_creates_button_state': instruction(0x5263a, 'bl', '#0x6d960'),
+        'device_creates_receiver_state': instruction(0x526fe, 'bl', '#0x50a80'),
+        'device_gets_slot_input_handle': instruction(0x52704, 'bl', '#0x6c38c'),
+        'device_stores_input_handle': instruction(0x5270a, 'str', 'r0, [r5, #0x78]'),
+    }
+    # The root LS2 method table is assembled with PC-relative name and handler pointers.
+    instruction(0x23c2a, 'add', 'r2, pc')
+    instruction(0x23c2e, 'add', 'r3, pc')
+    instruction(0x23c30, 'strd', 'r2, r3, [r4, #0x18]')
+    dual_name = string(struct.unpack('<I', read(0x23e18, 4))[0] + 0x23c2e)
+    dual_handler = (struct.unpack('<I', read(0x23e1c, 4))[0] + 0x23c32) & 0xffffffff
+    if dual_name != 'enableDualPairing' or dual_handler != 0x21231:
+        raise ValueError('Dual-pairing method registration differs')
+
+    functions = [
+        'interpret_ble_motion_packet', 'interpret_ble_voice_packet',
+        'lginput_uhid_parser_respond', 'lginput_uhid_parser_getSCDdata',
+        'lginput_motion_set_scd', 'lginput_uhid_sendData', '_uhid_packetizeData',
+        '_uhid_parser_getRemoteInformation', '_uhid_parser_getLiquidDetectInfo',
+        '_uhid_parser_getRemoteFWver', 'interface_mrcu_enableDualPairing',
+        'lginput_util_setDualPairingMode', 'lginput_util_getDualPairingMode',
+        'xpa_wbs_isSupportedRemocon', 'xpa_wbs_pairMotionRemocon',
+        '_uhid_check_mrcu_dev_index', 'lginput_util_isMagicRemote',
+        'lginput_util_isBleRemote',
+        'lginput_devmngr_command', '_mrcu_state_isLowSignal',
+        'event_wake_on_shake', 'event_wake_on_shake_init',
+        'interface_mrcu_cursor_setWakeUpCondition',
+        'mrcu_add', 'mrcu_remove', 'mrcu_state_create', 'lginput_get_uinput_handle',
+    ]
+    remote_names = []
+    for address in range(0xbbfd4, 0xbc31c, 24):
+        name_pointer = struct.unpack('<I', read(address + 12, 4))[0]
+        remote_names.append({'entry': hex(address), 'name': string(name_pointer)})
+    return {
+        'schema': 1, 'sha256': digest, 'architecture': 'ARM32 Thumb, little-endian',
+        'scope': 'Receiver interoperability tables and reviewed instructions; not a complete remote specification',
+        'command_names': table('_lginput2_cmd_nameTable', 248, 'name'),
+        'response_handlers': table('_lginput2_parser_funcTable', 216, 'handler'),
+        'uei_command_names': table('_lginput2_uei_cmd_nameTable', 72, 'name'),
+        'ble_family_table_names': remote_names,
+        'dual_pairing_registration': {'method': dual_name, 'handler': hex(dual_handler & ~1),
+                                      'construction_address': '0x23c30'},
+        'instruction_checks': evidence,
+        'functions': {name: {'address': hex(symbols[name]['st_value'] & ~1),
+                             'size': symbols[name]['st_size']} for name in functions},
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--check', type=Path, help='Compare the extracted map with a saved JSON map')
+    args = parser.parse_args()
+    try:
+        result = extract(args.binary.read_bytes())
+        if args.check:
+            if json.loads(args.check.read_text()) != result:
+                raise ValueError('Extracted map differs from the saved map')
+            print('Reviewed LG firmware map matches')
+        else:
+            print(json.dumps(result, indent=2))
+    except (OSError, ValueError, KeyError, StopIteration) as error:
+        parser.exit(1, f'{error}\n')
+    except ImportError:
+        parser.exit(1, 'Install pyelftools and capstone in an analysis virtual environment\n')
+
+
+if __name__ == '__main__':
+    main()

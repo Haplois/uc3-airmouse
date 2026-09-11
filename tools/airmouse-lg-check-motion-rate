@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Read the loaded LG motion calibration's nominal period without changing the TV."""
+import argparse
+from pathlib import Path
+import runpy
+
+PROBE = '''
+import hashlib, json, math, struct, subprocess
+pid = int(subprocess.check_output(['systemctl', 'show', 'lginput2.service', '-p', 'MainPID', '--value']))
+with open('/proc/%s/exe' % pid, 'rb') as binary:
+    digest = hashlib.sha256(binary.read()).hexdigest()
+if digest not in (
+    'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b',
+    'e5cd3753045c2e39b9fda2ea0968b8440dddab4f7494872a0a9bb7a89025f51a',
+    '971bc4fce21529adcdf194f9226aa3bfa44ad0d4ad462ab4902112aeca360b70',
+    'e0d7097ef21fe83af854633307f82f169d5b9e653887de40bdc8004ea88420e3',
+):
+    raise SystemExit('Unreviewed receiver build')
+with open('/proc/%s/maps' % pid) as maps:
+    base = next(int(row.split('-')[0], 16) for row in maps
+                if '/usr/sbin/lginput2' in row and row.split()[2] == '00000000')
+with open('/proc/%s/mem' % pid, 'rb', buffering=0) as memory:
+    memory.seek(base + 0xd4028)
+    size, kind, magic, period = struct.unpack('<HHIf', memory.read(12))
+if (size, kind, magic) != (260, 5, 0xe7e1fafb) or not math.isfinite(period) or not 0.001 <= period <= .1:
+    raise SystemExit('No recognized loaded motion calibration')
+print(json.dumps({'scope': 'last loaded motion calibration, not measured delivery',
+                  'period_ms': round(period * 1000, 6),
+                  'nominal_rate_hz': round(1 / period, 3),
+                  'receiver_sha256': digest}))
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='root@TV-host; TV must already be reachable')
+    args = parser.parse_args()
+    module = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    print(module['TV'](args.host).ssh('python3 -', data=PROBE.encode()).strip())
+
+
+if __name__ == '__main__':
+    main()

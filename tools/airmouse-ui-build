@@ -52,13 +52,30 @@ patch('src/qml/main.qml', '    function loadSecondContainer(source, parameters =
     function loadSecondContainer(source, parameters = {}, openAfterLoad = true) {''')
 patch('src/qml/main.qml', '            console.debug("Loading second container", source);', '            airMouseOpen = source === "qrc:/airmouse/AirMouseHost.qml";\n            console.debug("Loading second container", source);')
 patch('src/qml/main.qml', '                    console.debug("Second container closed signal called");', '                    applicationWindow.airMouseOpen = false;\n                    console.debug("Second container closed signal called");')
+patch('src/qml/main.qml', '''                    applicationWindow.visible = true;
+                }
+            }
+        }
+    }
+
+    Connections {''', '''                    applicationWindow.visible = true;
+                }
+                if (applicationWindow.airMouseOpen && loader.item && loader.item.opened) {
+                    containerSecond.open();
+                    Qt.callLater(loader.item.resumeFromSleep);
+                }
+            }
+        }
+    }
+
+    Connections {''')
 patch('src/qml/components/TouchSlider.qml', '    function startSetup() {', '    Connections { target: applicationWindow; function onAirMouseOpenChanged() { touchSlider.refreshSetup(); } }\n\n    function startSetup() {\n        if (applicationWindow.airMouseOpen) { sliderLoader.source = ""; touchSlider.close(); return; }')
 patch('src/qml/components/entities/Base.qml', '    function open() {', '''    function open() {
         if (entityObj && currentEntityObj.type === EntityTypes.Button &&
             applicationWindow.launchAirMouseEntity(entityId)) return;''')
 patch('src/qml/components/entities/Base.qml', '                entityObj.push();', '''                if (!applicationWindow.launchAirMouseEntity(entityId)) entityObj.push();''')
 qrc = work / 'resources/qrc/airmouse.qrc'
-qrc.write_text('<RCC><qresource prefix="/airmouse">\n' + ''.join(f'<file alias="{p.name}">../../native/qml/{p.name}</file>\n' for p in sorted((root / 'native/qml').glob('*')) if p.suffix in ['.qml', '.js']) + '</qresource></RCC>\n')
+qrc.write_text('<RCC><qresource prefix="/airmouse">\n' + ''.join(f'<file alias="{p.name}">../../native/qml/{p.name}</file>\n' for p in sorted((root / 'native/qml').glob('*')) if p.suffix in ['.qml', '.js', '.svg']) + '</qresource></RCC>\n')
 with (work / 'remote-ui.pro').open('a') as f:
     f.write('\nHEADERS += native/cpp/AirMouseBridge.h\nSOURCES += native/cpp/AirMouseBridge.cpp\nRESOURCES += resources/qrc/airmouse.qrc\n')
 project = 'native/preview.pro' if args.preview else 'remote-ui.pro'

@@ -9,9 +9,9 @@
 
 class AirMouseBridge : public QObject {
     Q_OBJECT
-    Q_PROPERTY(QVariantMap snapshot READ snapshot NOTIFY changed)
-    Q_PROPERTY(bool connected READ connected NOTIFY changed)
-    Q_PROPERTY(bool busy READ busy NOTIFY changed)
+    Q_PROPERTY(QVariantMap snapshot READ snapshot NOTIFY snapshotChanged)
+    Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString launchEntityId READ launchEntityId CONSTANT)
 public:
     explicit AirMouseBridge(QObject *parent = nullptr);
@@ -21,13 +21,17 @@ public:
     bool busy() const { return !m_pending.isEmpty(); }
     QString launchEntityId() const { return qEnvironmentVariable("AIRMOUSE_LAUNCH_ENTITY_ID", "airmouse.main.launch"); }
     Q_INVOKABLE void open();
+    Q_INVOKABLE void reconnect();
     Q_INVOKABLE void close();
     Q_INVOKABLE void command(const QVariantMap &value);
 signals:
-    void changed();
+    void snapshotChanged();
+    void connectedChanged();
+    void busyChanged();
     void failed(QString message);
     void commandSucceeded(QString type);
 private:
+    void resetConnection();
     void receive();
     void write(const QVariantMap &value);
     QLocalSocket m_socket;

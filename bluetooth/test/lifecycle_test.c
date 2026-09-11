@@ -23,6 +23,9 @@
 #define hids_device_send_input_report_for_id fake_send_report
 #define hids_device_send_boot_mouse_input_report fake_send_boot
 #define hids_device_init fake_hids_init
+#define hids_device_init_with_storage fake_hids_storage
+#define gap_advertisements_set_data fake_advertising_data
+#define gap_scan_response_set_data fake_scan_response_data
 #define btstack_run_loop_get_time_ms fake_time
 #define btstack_run_loop_set_timer fake_set_timer
 #define btstack_run_loop_add_timer fake_add_timer
@@ -39,9 +42,11 @@ static unsigned whitelist_clears, whitelist_adds;
 static int device_slot, advertising_enabled;
 static uint8_t advertising_filter, whitelist_result, name_query_result, long_query_result;
 static uint8_t whitelist_address[6];
+static uint8_t advertised_data[31], scan_data[31], advertised_size, scan_size;
 static char registry_path[4096];
 static btstack_packet_handler_t name_callback;
-static uint8_t last_report[6];
+static uint8_t last_report[30];
+static uint16_t last_report_id;
 static uint16_t last_report_size;
 static void send_event(void);
 
@@ -96,10 +101,19 @@ static uint8_t capture(hci_con_handle_t connection, const uint8_t *report, uint1
     last_report_size = length; notifications++; return 0;
 }
 uint8_t fake_send_report(hci_con_handle_t connection, uint16_t id, const uint8_t *report, uint16_t length) {
-    assert((id == 1 && length == 6) || (id == 2 && length == 2) || (id == 3 && length == 1)); return capture(connection, report, length);
+    last_report_id=id; assert((id == LG_MOTION_REPORT && length == LG_MOTION_SIZE) || (id == LG_CONTROL_REPORT && length <= 30) || (id == 1 && length == 6) || (id == 2 && length == 2) || (id == 3 && length == 1)); return capture(connection, report, length);
 }
 uint8_t fake_send_boot(hci_con_handle_t connection, const uint8_t *report, uint16_t length) {
     assert(length == 3); return capture(connection, report, length);
+}
+void fake_advertising_data(uint8_t length, uint8_t *data) {
+    assert(length<=sizeof(advertised_data)); advertised_size=length; memcpy(advertised_data,data,length);
+}
+void fake_scan_response_data(uint8_t length, uint8_t *data) {
+    assert(length<=sizeof(scan_data)); scan_size=length; if(length) memcpy(scan_data,data,length);
+}
+void fake_hids_storage(uint8_t country, const uint8_t *map, uint16_t length, uint16_t count, hids_device_report_t *storage) {
+    assert(!country && map==lg_descriptor && length==sizeof(lg_descriptor) && count==5 && storage==lg_report_storage); hids_resets++;
 }
 void fake_hids_init(uint8_t country, const uint8_t *map, uint16_t length) {
     assert(country == 0); assert(map == descriptor && length == sizeof(descriptor)); hids_resets++;
@@ -129,7 +143,9 @@ static void request(const char *text) {
     char line[64]; assert(strlen(text) < sizeof(line)); strcpy(line, text); command(line);
 }
 static void reset(void) {
+    advertised_size=scan_size=0;
     hid_reset(&input);
+    lg_profile=lg_pairing=simulation_lg=control_subscribed=false; magic=(lg_remote){0}; control_head=control_count=0;
     consumer_subscribed=false; sent_consumer=0; consumer_sent_at=0;
     keyboard_subscribed=false; sent_key=0; key_sent_at=0;
     fast_advertising=false; advertising_started=switch_started=switching_host=0; db_mask=15; clock_ms = 100; link_encrypted = true; synchronous_send = false;
@@ -163,7 +179,7 @@ static void ready_connection(void) {
     assert(!ready()); assert(requests == 1); assert(notifications == 0);
     send_event();
     assert(ready()); assert(last_report_size == 6);
-    for (unsigned i = 0; i < sizeof(last_report); i++) assert(last_report[i] == 0);
+    for (unsigned i = 0; i < last_report_size; i++) assert(last_report[i] == 0);
 }
 static void hold(void) {
     ready_connection();
@@ -205,7 +221,7 @@ static void test_reconnect_resets_protocol_and_sends_zero_first(void) {
     assert(!ready() && notifications == before);
     send_event();
     assert(ready() && last_report_size == 6 && notifications == before + 1);
-    for (unsigned i = 0; i < sizeof(last_report); i++) assert(last_report[i] == 0);
+    for (unsigned i = 0; i < last_report_size; i++) assert(last_report[i] == 0);
 }
 static void test_repeated_stop_keeps_original_deadline(void) {
     hold();
@@ -426,6 +442,21 @@ static void test_advertising_filters_selected_identity_and_pairing_is_open(void)
     assert(hosts_select(&hosts,0)==0); advertise();
     assert(!advertising_enabled);
 }
+static void test_reconnect_restarts_fast_advertising_only_while_disconnected(void) {
+    reset(); disconnection_event();
+    clock_ms+=30000; tick_event(&tick);
+    assert(!fast_advertising && advertising_minimum==0x30);
+    request("RECONNECT 1");
+    assert(fast_advertising && advertising_minimum==0x20 && advertising_maximum==0x20 && advertising_started==clock_ms);
+    clock_ms+=30000; tick_event(&tick); assert(!fast_advertising);
+    ready_connection(); hold(); unsigned before=disconnects;
+    request("RECONNECT 2");
+    assert(!fast_advertising && disconnects==before && sent_buttons==1 && input.active);
+    reset(); disconnection_event(); request("DISCONNECT 1");
+    assert(hosts.selected_id==0);
+    fast_advertising=false;
+    request("RECONNECT 2"); assert(!fast_advertising);
+}
 static void test_stale_pairing_events_and_cancel_leave_current_link(void) {
     ready_connection();
     request("CANCEL_PAIR 1");
@@ -509,6 +540,14 @@ static void test_keyboard_reports_and_stop_release(void) {
     uint16_t page,usage; int32_t value;
     btstack_hid_parser_get_field(&parser,&page,&usage,&value);
     assert(page==7 && usage==82 && value==1);
+    const uint8_t lg_usages[]={40,41,227,75,78,127,128,129,120,72};
+    for(unsigned i=0;i<sizeof(lg_usages);i++) {
+        uint8_t report[]={3,lg_usages[i]};
+        btstack_hid_parser_init(&parser,descriptor,sizeof(descriptor),HID_REPORT_TYPE_INPUT,report,sizeof(report));
+        assert(btstack_hid_parser_has_more(&parser));
+        btstack_hid_parser_get_field(&parser,&page,&usage,&value);
+        assert(page==7 && usage==lg_usages[i] && value==1);
+    }
     request("STOP 2"); send_event(); send_event();
     assert(!sent_key && !stop_pending && ready());
     request("KEY 3 79"); send_event(); send_event();
@@ -552,11 +591,144 @@ static void test_disconnect_preserves_pairing_and_stops_advertising(void) {
     disconnection_event(); request("SELECT 2 00000001");
     assert(hosts.selected_id==1 && advertising_enabled);
 }
+static void lg_subscription(uint8_t id) {
+    uint8_t packet[]={HCI_EVENT_HIDS_META,5,HIDS_SUBEVENT_INPUT_REPORT_ENABLE,1,0,id,1};
+    radio_event(HCI_EVENT_PACKET,0,packet,sizeof(packet));
+}
+static void lg_control(uint8_t command_byte) {
+    uint8_t packet[]={HCI_EVENT_HIDS_META,7,HIDS_SUBEVENT_SET_REPORT,1,0,0xf9,HID_REPORT_TYPE_OUTPUT,1,command_byte};
+    radio_event(HCI_EVENT_PACKET,0,packet,sizeof(packet));
+}
+static void test_lg_control_before_motion_subscription(void) {
+    reset(); lg_profile=true;
+    lg_subscription(LG_CONTROL_REPORT); lg_control(0x13);
+    assert(!subscribed && control_count==1 && send_requested);
+    send_event();
+    assert(last_report_id==LG_CONTROL_REPORT && last_report_size==12 && last_report[0]==0x14 && !control_count);
+    lg_control(1); assert(magic.motion_requested);
+    lg_control(2); assert(!magic.motion_requested);
+    link_encrypted=false; lg_control(1); assert(!magic.motion_requested);
+}
+static void test_lg_motion_keys_stop_and_staleness(void) {
+    reset(); lg_profile=true; lg_subscription(LG_MOTION_REPORT); send_event();
+    assert(ready() && last_report_id==LG_MOTION_REPORT && last_report_size==19 && (last_report[2]&3)==2);
+    request("OPEN 1"); assert(magic.motion_requested);
+    request("IMU 0 66 -182 -236 -91 468 -4201"); send_event(); send_event();
+    assert((last_report[2]&3)==1 && last_report[4]==0 && last_report[5]==66 && last_report[14]==0xef && last_report[15]==0x97);
+    request("BUTTON 2 1"); send_event();
+    assert(sent_buttons==1 && last_report[16]==0x80 && last_report[17]==0x44);
+    request("STOP 3"); send_event();
+    assert(last_report[16]==0x80 && last_report[17]==0x3f && !sent_key);
+    send_event();
+    assert(!stop_pending && !input.active && !sent_buttons && !last_report[16] && !last_report[17] && (last_report[2]&3)==2);
+    request("LGKEY 4 32808"); send_event();
+    assert(sent_key==0x8028 && last_report[16]==0x80 && last_report[17]==0x28);
+    request("STOP 5"); send_event(); send_event();
+    assert(!sent_key && !stop_pending && !last_report[16] && !last_report[17]);
+    request("OPEN 6"); request("IMU 0 1 2 3 4 5 6"); clock_ms+=76;
+    unsigned count=notifications; send_event(); assert(notifications==count && input.dropped==1);
+    request("KEY 7 82"); assert(!input.count);
+    request("MEDIA 8 205"); assert(!input.count);
+    request("MOVE 0 5 6"); assert(!input.count);
+    lg_control(2); request("IMU 0 1 2 3 4 5 6"); send_event();
+    assert((last_report[2]&3)==2 && !last_report[4] && last_report[5]==1);
+    magic.sequence=255; request("IMU 0 1 2 3 4 5 6"); send_event(); assert(last_report[1]==255 && magic.sequence==255);
+}
+static void test_lg_profile_changes_only_after_disconnect(void) {
+    ready_connection();
+    assert(!hosts_set_bluetooth_name(&hosts,2,"[LG] webOS TV OLED77G3PSA"));
+    request("SELECT 1 00000002"); assert(!lg_profile && disconnects==1);
+    disconnection_event(); assert(lg_profile);
+    request("SELECT 2 00000001"); assert(!lg_profile);
+    request("PAIR_LG 3"); assert(pairing() && lg_profile);
+    request("CANCEL_PAIR 4"); assert(!pairing() && !lg_profile);
+}
+
+static void test_lg_motion_wakes_after_tv_sleep_but_not_after_user_stop(void) {
+    reset(); lg_profile=true; lg_subscription(LG_MOTION_REPORT); send_event();
+    request("OPEN 1");
+    lg_control(2);
+    request("IMU 0 1 -2 3 0 0 -4096"); send_event();
+    assert((last_report[2]&3)==2);
+    request("IMU 0 0 500 0 0 0 -4096"); send_event();
+    assert((last_report[2]&3)==2);
+    request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(last_report[1]==0 && (last_report[2]&3)==2);
+    send_event();
+    assert((last_report[2]&3)==1);
+    request("STOP 2"); send_event(); send_event();
+    unsigned count=notifications;
+    request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(!input.active && notifications==count && (last_report[2]&3)==2);
+}
+
+static void test_lg_resume_sends_motion_events_and_consecutive_sequence(void) {
+    reset(); lg_profile=true; lg_subscription(LG_MOTION_REPORT); send_event();
+    request("OPEN 1"); request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(last_report[1]==0 && (last_report[2]&3)==2);
+    assert(!last_report[4] && !last_report[5]);
+    assert(last_report[16]==0x80 && last_report[17]==0x3e);
+    send_event(); assert(last_report[1]==1 && (last_report[2]&3)==1);
+    clock_ms+=20; request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(last_report[1]==2);
+    request("STOP 2"); send_event();
+    assert(last_report[1]==2 && (last_report[2]&3)==2);
+    assert(last_report[16]==0x80 && last_report[17]==0x3f);
+    send_event();
+    clock_ms+=5000;
+    request("OPEN 3"); request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(last_report[1]==0 && (last_report[2]&3)==2);
+    send_event(); assert(last_report[1]==1 && (last_report[2]&3)==1);
+}
+
+static void test_lg_key_sleep_sends_stop_then_wake_without_holding_internal_keys(void) {
+    reset(); lg_profile=true; lg_subscription(LG_MOTION_REPORT); send_event();
+    request("OPEN 1"); request("IMU 0 500 0 0 0 0 -4096"); send_event(); send_event();
+    request("LGKEY 2 32774"); send_event();
+    assert(sent_key==0x8006);
+    lg_control(2); send_event();
+    assert(last_report[1]==1 && (last_report[2]&3)==2);
+    assert(last_report[16]==0x80 && last_report[17]==0x3f);
+    assert(sent_key==0x8006);
+    send_event(); assert(!sent_key && !last_report[16] && !last_report[17]);
+    unsigned count=notifications;
+    lg_control(2); send_event(); assert(notifications==count);
+    request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(last_report[1]==0 && (last_report[2]&3)==2);
+    assert(last_report[16]==0x80 && last_report[17]==0x3e && !sent_key);
+    send_event(); assert(last_report[1]==1 && (last_report[2]&3)==1);
+    assert(!last_report[16] && !last_report[17]);
+    request("STOP 3"); send_event(); send_event();
+    lg_control(1);
+    count=notifications;
+    request("IMU 0 500 0 0 0 0 -4096"); send_event();
+    assert(notifications==count && !input.active);
+}
+
+static void test_lg_registration_advertises_captured_scd_metadata(void) {
+    reset(); handle=HCI_CON_HANDLE_INVALID;
+    request("PAIR_LG 1");
+    const uint8_t captured_ad[]={2,1,5,23,255,0xc4,0x00,'S','C','D',' ','2','1','.','2',',','B','A',' ','3','5',',','w','e','b','O','S'};
+    const uint8_t captured_scan[]={9,9,'L','G','E',' ','M','R','2','3'};
+    assert(advertising_enabled && pairing() && lg_profile);
+    assert(advertised_size==sizeof(captured_ad) && !memcmp(advertised_data,captured_ad,sizeof(captured_ad)));
+    assert(scan_size==sizeof(captured_scan) && !memcmp(scan_data,captured_scan,sizeof(captured_scan)));
+    request("CANCEL_PAIR 2");
+    assert(!lg_profile && advertised_size==sizeof(advertising));
+    assert(!memcmp(advertised_data,advertising,sizeof(advertising)) && scan_size==0);
+}
 int main(void) {
     unsetenv("NOTIFY_SOCKET");
     char directory[]="/tmp/airmouse-lifecycle-test-XXXXXX";
     assert(mkdtemp(directory));
     assert(snprintf(registry_path,sizeof(registry_path),"%s/hosts.dat",directory)>0);
+    test_lg_key_sleep_sends_stop_then_wake_without_holding_internal_keys();
+    test_lg_control_before_motion_subscription();
+    test_lg_motion_keys_stop_and_staleness();
+    test_lg_profile_changes_only_after_disconnect();
+    test_lg_registration_advertises_captured_scd_metadata();
+    test_lg_motion_wakes_after_tv_sleep_but_not_after_user_stop();
+    test_lg_resume_sends_motion_events_and_consecutive_sequence();
     test_unsubscribe_releases_by_disconnect();
     test_media_while_paused_and_stop_release();
     test_media_encryption_loss_disconnects();
@@ -580,6 +752,7 @@ int main(void) {
     test_new_bond_registration_requires_pairing_and_persists_selection();
     test_advertising_filters_selected_identity_and_pairing_is_open();
     test_reconnect_advertises_at_twenty_milliseconds();
+    test_reconnect_restarts_fast_advertising_only_while_disconnected();
     test_stale_pairing_events_and_cancel_leave_current_link();
     test_legacy_migration_and_forgotten_bond_cleanup();
     assert(unlink(registry_path)==0);

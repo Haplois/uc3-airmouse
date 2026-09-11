@@ -1,0 +1,1 @@
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="bmi323", SYMLINK+="input/airmouse-wake", TAG+="systemd"

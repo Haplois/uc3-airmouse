@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Check calibration metadata passed by the reviewed receiver's device initialization."""
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import struct
+
+
+def initialize(data, slot, device_type=16, dual=False):
+    from elftools.elf.elffile import ELFFile
+    from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE
+    from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                                   UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5,
+                                   UC_ARM_REG_R7, UC_ARM_REG_R10, UC_ARM_REG_LR,
+                                   UC_ARM_REG_SP, UC_ARM_REG_PC)
+    machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    machine.mem_map(0, 0x200000)
+    machine.mem_map(0x300000, 0x20000)
+    for segment in ELFFile(io.BytesIO(data)).iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            machine.mem_write(segment['p_vaddr'], segment.data())
+    device, state, stack, scd, stop = 0x310000, 0x311000, 0x30e000, 0x312000, 0x52780
+    def word(address, value=None):
+        if value is not None:
+            machine.mem_write(address, struct.pack('<I', value))
+        return struct.unpack('<I', machine.mem_read(address, 4))[0]
+    word(device + 4, slot)
+    word(device + 8, device_type)
+    word(device + 0x32, slot)
+    word(stack + 0x2e8, scd)
+    word(stack + 0x2ec, 25)
+    word(0xd65e4, int(dual))
+    machine.mem_write(scd, b'SCD 21.2,BA 35,webOS\0')
+    for register, value in ((UC_ARM_REG_R4, device), (UC_ARM_REG_R5, state),
+                            (UC_ARM_REG_R7, slot), (UC_ARM_REG_R10, device + 0x54),
+                            (UC_ARM_REG_SP, stack)):
+        machine.reg_write(register, value)
+    result = {'parsed_calibration': False}
+    def hook(_machine, address, _size, _context):
+        if address == stop:
+            machine.emu_stop()
+            return
+        if (0x5274c <= address < 0x52780 or 0x52806 <= address < 0x52816
+                or 0x5dbf0 <= address < 0x5dbfa or 0xb9600 <= address < 0xb9660):
+            return
+        if address == 0x5aff0:
+            r0, r2, r3 = [machine.reg_read(r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R2, UC_ARM_REG_R3)]
+            if r0 != scd or (r2, r3) != (device + 0x54, device + 0x58):
+                raise ValueError('Wrong calibration parser arguments')
+            word(r2, 21)
+            word(r3, 2)
+            result['parsed_calibration'] = True
+        elif address == 0x5815c:
+            result.update(handle=machine.reg_read(UC_ARM_REG_R0),
+                          year=word(stack + 8), version=word(stack + 12))
+        else:
+            raise ValueError(f'Unexpected initialization call: {address:#x}')
+        machine.reg_write(UC_ARM_REG_R0, 1)
+        machine.reg_write(UC_ARM_REG_PC, machine.reg_read(UC_ARM_REG_LR))
+    machine.hook_add(UC_HOOK_CODE, hook)
+    machine.emu_start(0x5274d, stop, count=2000)
+    if machine.reg_read(UC_ARM_REG_PC) != stop or 'year' not in result:
+        raise ValueError('Initialization did not reach motion creation')
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--require-secondary', action='store_true')
+    args = parser.parse_args()
+    data = args.binary.read_bytes()
+    if hashlib.sha256(data).hexdigest() not in (
+        'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b',
+        '4dcf736250abc59372ff6f9b6254fc35d326178d35f6a2a7ec1d3b02ba2d8647',
+        '1d1f4327ac01e624b01e31b9b82831033ec2a4c083695d401ed7aa83c7931cd3',
+        'e5cd3753045c2e39b9fda2ea0968b8440dddab4f7494872a0a9bb7a89025f51a',
+        '971bc4fce21529adcdf194f9226aa3bfa44ad0d4ad462ab4902112aeca360b70',
+        'e0d7097ef21fe83af854633307f82f169d5b9e653887de40bdc8004ea88420e3',
+    ):
+        parser.exit(1, 'Unreviewed receiver binary\n')
+    result = initialize(data, 1, dual=True)
+    print(json.dumps(result))
+    if args.require_secondary and (result['year'], result['version']) != (21, 2):
+        parser.exit(1, 'Second-slot motion creation receives no calibration version\n')
+
+
+if __name__ == '__main__':
+    main()

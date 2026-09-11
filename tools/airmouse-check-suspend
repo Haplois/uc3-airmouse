@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Test one Remote 3 suspend/resume using a twenty-second RTC wake alarm."""
+import argparse
+import re
+import shlex
+import subprocess
+import time
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host', default='root@10.0.10.51')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+ssh = ['ssh','-o','BatchMode=yes','-o','ConnectTimeout=3',args.host]
+
+def remote(command, *, timeout=15):
+    return subprocess.run(ssh+[command],capture_output=True,text=True,timeout=timeout)
+
+baseline = remote('systemctl show airmouse.service airmouse-bluetooth.service -p MainPID --value')
+if baseline.returncode:
+    raise SystemExit('Remote is unreachable; wake it before running the check')
+script = r'''
+import fs from 'node:fs';
+const alarm='/sys/class/rtc/rtc0/wakealarm';
+if(fs.readFileSync(alarm,'utf8').trim())throw new Error('An RTC alarm already exists');
+const key=fs.readFileSync('/mnt/data/airmouse/state/core-api-key','utf8').trim();
+fs.writeFileSync(alarm,'+20');
+console.log('RTC wake armed for twenty seconds');
+try {
+ const r=await fetch('http://127.0.0.1/api/system?cmd=STANDBY',{method:'POST',headers:{Authorization:'Bearer '+key},signal:AbortSignal.timeout(5000)});
+ if(!r.ok)throw new Error('Standby HTTP '+r.status);
+ console.log('Standby requested');
+} catch(error) { console.log(error.message); }
+'''
+print('Testing sleep recovery; Remote 3 will wake itself.',flush=True)
+try:
+    result=remote(shlex.join(['node','--input-type=module','-e',script]),timeout=30)
+    print(result.stdout.strip(),flush=True)
+except subprocess.TimeoutExpired:
+    pass
+deadline=time.monotonic()+65
+while time.monotonic()<deadline:
+    time.sleep(3)
+    result=remote('systemctl show airmouse.service airmouse-bluetooth.service -p MainPID --value')
+    if result.returncode or result.stdout==baseline.stdout or '0' in result.stdout.split():
+        continue
+    result=remote("node -e "+shlex.quote("const s=require('/mnt/data/airmouse/state/status.json');console.log(JSON.stringify({connected:s.core_connected,ready:s.targets.find(t=>t.id===s.target)?.ready,error:s.error,sampling:s.applied_sampling}));if(!s.core_connected||s.error||!s.targets.find(t=>t.id===s.target)?.ready)process.exitCode=1"))
+    if result.returncode:
+        continue
+    print(result.stdout.strip(),flush=True)
+    print('Both services restarted and the selected Bluetooth target is ready.',flush=True)
+    remote("printf 0 > /sys/class/rtc/rtc0/wakealarm")
+    break
+else:
+    raise SystemExit('Suspend recovery was not verified within the deadline; RTC alarm was left to expire.')

@@ -161,6 +161,27 @@ test('heartbeat loss still stops pointing after a backwards wall-clock jump', {t
   assert.equal(controller.pointer,false);
 });
 
+test('LG navigation crosses the native socket and controller while pointing is paused', async t => {
+  const { controller, output, dir } = managedSetup(t);
+  output.targets[0].bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  output.targets[0].name = 'TV';
+  const calls = [];
+  output.key = async (target, key) => calls.push({ target, key });
+  const c = await client(t, controller, dir);
+  assert.equal(controller.state().target_profile, 'lg-tv');
+  assert.equal(controller.pointer, false);
+  const keys = ['ok', 'back', 'home', 'channel_up', 'channel_down', 'input_next', 'input_previous', 'quick_settings', 'all_settings', 'input_picker', 'hdmi1', 'netflix', 'youtube', 'steam_machine'];
+  for (const [index, key] of keys.entries()) {
+    c.send({ id: index + 1, type: 'key', key });
+    assert.equal((await c.response(index + 1)).ok, true);
+  }
+  assert.deepEqual(calls, keys.map(key => ({ target: '00000001', key })));
+  c.send({ id: 100, type: 'key', key: 'power' });
+  assert.equal((await c.response(100)).ok, false);
+  controller.target = '00000002';
+  assert.equal(controller.state().target_profile, 'computer');
+});
+
 test('owned button edges bypass a pending control command and validate down exactly', async t => {
   const {controller,output,dir}=setup(t);output.backend='owned';output.buttonEdges=true;output.paired=true;
   const c=await client(t,controller,dir);c.send({id:1,type:'on'});assert.equal((await c.response(1)).ok,true);
@@ -287,4 +308,46 @@ test('disconnect supersedes a pending mouse release without reporting a false fa
   c.send({id:3,type:'disconnect'}); assert.equal((await c.response(3)).ok,true);
   cancel(new Error('Bluetooth input invalidated by stop'));
   assert.equal((await c.response(2)).ok,true);
+});
+
+test('native LG pairing pauses and releases input before selecting the TV profile', async t => {
+  const { controller, output, dir } = managedSetup(t), c = await client(t, controller, dir);
+  let profile;
+  controller.lgPairing = { pair: async (backend, signal) => { signal.throwIfAborted(); await backend.pair('lg-tv'); } };
+  output.pair = async value => { assert.equal(controller.pointer, false); assert.equal(output.buttons, 0); profile = value; };
+  c.send({ id: 1, type: 'on' }); assert.equal((await c.response(1)).ok, true);
+  c.send({ id: 2, type: 'button', button: 1, down: true }); assert.equal((await c.response(2)).ok, true);
+  c.send({ id: 3, type: 'pair_lg' }); assert.equal((await c.response(3)).ok, true);
+  assert.equal(profile, 'lg-tv');
+});
+
+test('closing the Air mouse screen aborts an in-progress LG IR pairing operation', async t => {
+  const { controller } = managedSetup(t);
+  let activeSignal;
+  controller.lgPairing = { pair: async (_, signal) => {
+    activeSignal = signal;
+    await delay(10000, undefined, { signal });
+  } };
+  const pairing = controller.apply({ type: 'pair_lg' });
+  const rejected = assert.rejects(pairing, { name: 'AbortError' });
+  while (!activeSignal) await delay(1);
+  await controller.releaseControl('Air mouse screen closed');
+  await rejected;
+  assert.equal(activeSignal.aborted, true);
+  assert.equal(controller.error, '');
+  assert.equal(controller.reason, 'Air mouse screen closed');
+});
+
+test('the UI can request a reconnect only while the selected computer is disconnected', async t => {
+  const { controller, output, dir } = managedSetup(t);
+  output.reconnectCalls = 0; output.reconnect = async () => { output.reconnectCalls++; };
+  const c = await client(t, controller, dir);
+  c.send({ id: 1, type: 'reconnect' });
+  assert.equal((await c.response(1)).ok, false, 'connected target rejects reconnect');
+  output.targets[0].ready = false; output.targets[0].connected = false;
+  c.send({ id: 2, type: 'reconnect' });
+  assert.equal((await c.response(2)).ok, true);
+  assert.equal(output.reconnectCalls, 1);
+  c.send({ id: 3, type: 'reconnect', target: '00000001' });
+  assert.equal((await c.response(3)).ok, false, 'extra fields are rejected');
 });

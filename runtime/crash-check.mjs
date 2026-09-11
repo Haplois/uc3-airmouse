@@ -11,7 +11,7 @@ const events = () => Object.fromEntries(fs.readdirSync(`${sensor.root}/events`).
 const wake = events();
 const run = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 try {
-  run('systemd-run', ['--unit=airmouse-crash', '--collect', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'RuntimeDirectory=airmouse', '-p', `ExecStopPost=/usr/bin/node ${base}/current/runtime/main.mjs recover`, '-E', `AIRMOUSE_STATE=${base}/state`, '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock', '/usr/bin/node', `${base}/current/runtime/record.mjs`, `${base}/state`, '400', '10', 'keep-range']);
+  run('systemd-run', ['--unit=airmouse-crash', '--collect', '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'SupplementaryGroups=input', '-p', 'RuntimeDirectory=airmouse', '-p', `ExecStopPost=/usr/bin/node ${base}/current/runtime/main.mjs recover`, '-E', `AIRMOUSE_STATE=${base}/state`, '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock', '/usr/bin/node', `${base}/current/runtime/record.mjs`, `${base}/state`, '400', '10', 'keep-range']);
   let active = false;
   for (let i = 0; i < 40; i++) {
     if (sensor.io.read('buffer/enable') === '1') { active = true; break; }

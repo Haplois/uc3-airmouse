@@ -1,0 +1,75 @@
+{
+  "source": "Original LGE MR23, LG OLED77G3PSA, passive HCI recordings on 2026-09-08. Only event names, sequence numbers and timestamps retained. FD navigation key codes: start 0x803e, stop 0x803f.",
+  "captures": [
+    {
+      "capture": "magic-20260908T110857Z.hci-monitor",
+      "events": [
+        {
+          "at_ns": 1788865785521762120,
+          "event": "start",
+          "sequence": 0
+        },
+        {
+          "at_ns": 1788865824271751200,
+          "event": "stop",
+          "sequence": 35
+        },
+        {
+          "at_ns": 1788865854141755460,
+          "event": "start",
+          "sequence": 0
+        }
+      ]
+    },
+    {
+      "capture": "axis-pair-lg-20260908.hci-monitor",
+      "events": [
+        {
+          "at_ns": 1788873720567091280,
+          "event": "start",
+          "sequence": 0
+        },
+        {
+          "at_ns": 1788873771887826260,
+          "event": "stop",
+          "sequence": 11
+        }
+      ]
+    },
+    {
+      "capture": "magic-20260908T133830Z.hci-monitor",
+      "events": [
+        {
+          "at_ns": 1788874734667152680,
+          "event": "start",
+          "sequence": 0
+        },
+        {
+          "at_ns": 1788874741877215620,
+          "event": "stop",
+          "sequence": 205
+        },
+        {
+          "at_ns": 1788874865417322240,
+          "event": "start",
+          "sequence": 0
+        },
+        {
+          "at_ns": 1788874870057178260,
+          "event": "stop",
+          "sequence": 206
+        },
+        {
+          "at_ns": 1788874879537230720,
+          "event": "start",
+          "sequence": 0
+        },
+        {
+          "at_ns": 1788874880397318680,
+          "event": "stop",
+          "sequence": 85
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,23 @@ Rectangle {
     readonly property bool pointing: bridge.connected && !!viewState.pointer
     readonly property bool pointerEnabled: pointing || bridge.connected && viewState.pointer_enabled === true
     readonly property bool swapClickButtons: viewState.swap_click_buttons === true
+    readonly property bool lgTV: viewState.target_profile === "lg-tv"
+    readonly property bool reconnecting: !!viewState.target && (!bridge.connected || !viewState.core_connected)
+    // The selected computer is saved but its Bluetooth link is down. Any physical press asks the
+    // service to advertise again; the service also watches for a shake on its own.
+    readonly property bool targetDisconnected: bridge.connected && viewState.core_connected && !!viewState.target && !viewState.ready && !viewState.pairing && !viewState.switching
+    function reconnectOnPress() {
+        if (screenPage !== "mouse" || !targetDisconnected || bridge.busy) return false;
+        send({type: "reconnect"});
+        notice = "Reconnecting to " + (viewState.target_name || "the selected computer"); noticeTimer.restart();
+        return true;
+    }
+    property bool reconnectExpired: false
+    onReconnectingChanged: reconnectExpired = false
+    Timer { interval: 5000; running: page.reconnecting; onTriggered: page.reconnectExpired = true }
+    property bool pointerSessionActive: true
+    property bool automaticStartRequested: false
+    readonly property bool automaticPointer: lgTV && pointerSessionActive && screenPage === "mouse" && bridge.connected && viewState.ready && !viewState.switching && !viewState.calibrating && !viewState.error
     property string screenPage: "mouse"
     property string notice: ""
     property bool touching: false
@@ -22,12 +39,18 @@ Rectangle {
     property int physicalButtons: 0
     property int touchButtons: 0
     property int heldButtons: 0
-    readonly property bool canPair: viewState.bluetooth_backend === "owned" && !viewState.paired
+    readonly property bool canPair: viewState.core_connected && viewState.bluetooth_backend === "owned" && !viewState.paired
     signal exitRequested()
     color: palette.bg
-    onPointingChanged: { if (!pointing) { endScroll(); releaseButtons(); } }
+    onPointingChanged: { if (pointing) automaticStartRequested = false; else { endScroll(); releaseButtons(); } }
+    onAutomaticPointerChanged: { if (!automaticPointer) automaticStartRequested = false; }
+    Timer {
+        interval: 100
+        running: page.automaticPointer && !page.pointerEnabled && !page.bridge.busy && !page.automaticStartRequested
+        onTriggered: { page.automaticStartRequested = true; page.send({type: "on"}); }
+    }
     onScreenPageChanged: { releaseButtons(); Qt.inputMethod.hide(); }
-    Timer { interval: 30000; repeat: true; running: true; onTriggered: page.timeText = Qt.formatTime(new Date(), "hh:mm") }
+    Timer { interval: 30000; repeat: true; running: page.visible; onTriggered: page.timeText = Qt.formatTime(new Date(), "hh:mm") }
     Connections { target: page.bridge; function onFailed(message) { page.notice = message; noticeTimer.restart(); } }
     Timer { id: noticeTimer; interval: 4500; onTriggered: page.notice = "" }
 
@@ -55,11 +78,28 @@ Rectangle {
     }
     function toggle() {
         if (screenPage !== "mouse") return;
+        if (reconnectOnPress()) return;
+        if (bridge.busy && !pointerEnabled) return;
+        if (lgTV) { if (!pointerEnabled) send({type: "on"}); return; }
         if (pointing) releaseButtons();
         send({type: pointerEnabled ? "off" : "on"});
     }
+    function remoteBack() {
+        if (lgTV && screenPage === "mouse" && reconnectOnPress()) return;
+        if (lgTV && screenPage === "mouse") direction("back");
+        else back();
+    }
+    function remotePower() {
+        if (!lgTV) { toggle(); return; }
+        if (screenPage === "mouse" && bridge.connected && !bridge.busy) send({type: "power"});
+    }
+    function remoteHome() {
+        if (lgTV && screenPage === "mouse" && reconnectOnPress()) return;
+        if (lgTV && screenPage === "mouse") direction("home");
+        else nextDevice();
+    }
     function nextDevice() {
-        if (screenPage !== "mouse" || !bridge.connected || bridge.busy) return;
+        if (screenPage !== "mouse" || !bridge.connected || !viewState.core_connected || bridge.busy) return;
         var devices = (viewState.targets || []).slice(0, 3);
         if (!devices.length) return;
         var selected = -1;
@@ -68,10 +108,19 @@ Rectangle {
         send({type: "target", target: devices[(selected + 1) % devices.length].id, keep_pointer: true});
     }
     function media(key) {
+        if (reconnectOnPress()) return;
         if (screenPage !== "mouse" || !bridge.connected || bridge.busy || !viewState.ready) return;
+        if (lgTV && (key === "previous" || key === "next")) { direction(key === "next" ? "input_next" : "input_previous"); return; }
         send({type: "media", key: key});
     }
+    function tvSettings(all) {
+        if (lgTV) direction(all ? "all_settings" : "quick_settings");
+    }
+    function tvInput(picker) {
+        if (lgTV) direction(picker ? "input_picker" : "hdmi1");
+    }
     function direction(key) {
+        if (reconnectOnPress()) return;
         if (screenPage !== "mouse" || !bridge.connected || bridge.busy || !viewState.ready) return;
         send({type: "key", key: key});
     }
@@ -81,6 +130,8 @@ Rectangle {
         if (touchscreen) touchButtons |= button;
         else physicalButtons |= button;
         if (screenPage !== "mouse") return;
+        if (reconnectOnPress()) return;
+        if (lgTV && (button === 2 || !pointing)) { direction(button === 2 ? "back" : "ok"); return; }
         if (!pointing) { notice = "Start pointing to click"; noticeTimer.restart(); return; }
         if (viewState.button_edges !== true) { click(button); return; }
         if (heldButtons & button) return;
@@ -126,17 +177,19 @@ Rectangle {
         }
     }
     function statusText() {
-        if (!bridge.connected) return "Air mouse service unavailable";
+        if (!bridge.connected) return reconnecting && !reconnectExpired ? "Reconnecting…" : "Air mouse service unavailable";
         if (viewState.error) return viewState.error;
         if (viewState.ownership_status && !viewState.core_connected) return viewState.ownership_status;
-        if (!viewState.core_connected) return "Bluetooth service unavailable";
+        if (!viewState.core_connected) return reconnecting && !reconnectExpired ? "Reconnecting…" : "Bluetooth service unavailable";
         if (viewState.switching) return pointerEnabled ? "Connecting · pointing stays on" : "Connecting · pointer paused";
         if (viewState.pairing) return "Pairing · choose Air mouse on your computer";
         if (canPair) return "Pair your computer to get started";
         if (pointing) return touching ? "Scrolling" : "Pointing is on";
-        if (viewState.stop_reason && viewState.stop_reason.indexOf("Paused") === 0) return viewState.stop_reason + " · press Power";
+        if (!lgTV && viewState.stop_reason && viewState.stop_reason.indexOf("Paused") === 0) return viewState.stop_reason + " · press Power";
         if (!viewState.target) return "Choose a paired computer";
-        if (!viewState.ready) return "Target unavailable · reconnect Bluetooth";
+        if (!viewState.ready && viewState.reconnecting) return "Reconnecting · press any key or shake to retry";
+        if (!viewState.ready) return lgTV ? "TV not connected · press a key or shake, Power turns it on" : "Not connected · press a key or shake to reconnect";
+        if (lgTV) return "LG TV · pointer starts automatically";
         return "Connected · pointer paused";
     }
 
@@ -163,8 +216,8 @@ Rectangle {
                     Button {
                         objectName: "monitorButton"
                         anchors.horizontalCenter: parent.horizontalCenter; width: 260; height: 134
-                        enabled: page.pointerEnabled || page.bridge.connected && page.viewState.ready && !page.bridge.busy
-                        Accessible.name: page.pointerEnabled ? "Pause pointing" : "Start pointing"
+                        enabled: page.pointerEnabled || page.bridge.connected && page.viewState.ready
+                        Accessible.name: page.lgTV ? "Pointing always on for LG TV" : page.pointerEnabled ? "Pause pointing" : "Start pointing"
                         onClicked: page.toggle()
                         background: Rectangle {
                             radius: 19; border.color: parent.activeFocus ? page.palette.accent : page.palette.line
@@ -174,13 +227,13 @@ Rectangle {
                         contentItem: Item { Glyph { anchors.centerIn: parent; width: 60; height: 60; kind: page.pointerEnabled ? "pointer" : "pause"; ink: page.palette.accent } }
                         Rectangle { anchors.top: parent.bottom; anchors.horizontalCenter: parent.horizontalCenter; width: 58; height: 13; color: "transparent"; border.color: page.palette.line }
                     }
-                    Text { textFormat: Text.PlainText; y: 160; width: parent.width; text: page.viewState.target_name || "Choose a computer"; color: page.palette.fg; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 36; elide: Text.ElideRight }
+                    Text { objectName: "targetName"; textFormat: Text.PlainText; y: 160; width: parent.width; text: page.viewState.target_name || (page.bridge.connected && page.viewState.core_connected ? "Choose a computer" : "Connecting…"); color: page.palette.fg; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 36; elide: Text.ElideRight }
                     Text { textFormat: Text.PlainText; y: 208; width: parent.width; text: page.statusText(); color: page.palette.muted; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 18; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
                 }
                 Rectangle {
                     width: parent.width; height: 250; radius: 25; color: page.palette.card; border.color: page.palette.line
                     Text { textFormat: Text.PlainText; x: 20; y: 35; text: "QUICK SWITCH"; color: page.palette.muted; font.pixelSize: 14 }
-                    ActionButton { objectName: "allDevicesButton"; anchors.right: parent.right; anchors.rightMargin: 20; y: 15; width: 158; height: 56; text: page.canPair && !page.viewState.device_management ? "Pair computer" : "All devices ›"; textSize: 16; tones: page.palette; enabled: page.bridge.connected && !page.bridge.busy; onClicked: page.canPair && !page.viewState.device_management ? page.send({type: "pair"}) : page.navigate("targets") }
+                    ActionButton { objectName: "allDevicesButton"; anchors.right: parent.right; anchors.rightMargin: 20; y: 15; width: 158; height: 56; text: page.canPair && !page.viewState.device_management ? "Pair computer" : "All devices ›"; textSize: 16; tones: page.palette; enabled: page.bridge.connected && page.viewState.core_connected; onClicked: { if (page.bridge.busy) return; page.canPair && !page.viewState.device_management ? page.send({type: "pair"}) : page.navigate("targets"); } }
                     Row {
                         x: 20; y: 86; width: parent.width - 40; spacing: 10
                         Repeater {
@@ -189,7 +242,7 @@ Rectangle {
                                 objectName: "quickTarget" + index
                                 width: (parent.width - 20) / 3; height: 144
                                 readonly property bool chosen: modelData.id === page.viewState.target
-                                enabled: page.bridge.connected && !page.bridge.busy
+                                enabled: page.bridge.connected && page.viewState.core_connected
                                 Accessible.name: modelData.name
                                 background: Rectangle { color: chosen ? page.palette.accent : page.palette.bg; radius: 15; border.color: page.palette.line; border.width: parent.activeFocus ? 2 : 1 }
                                 contentItem: Item {
@@ -203,13 +256,14 @@ Rectangle {
                                 }
                                 }
                                 onClicked: {
+                                    if (page.bridge.busy) return;
                                     page.endScroll(); page.releaseButtons();
                                     page.send(chosen ? {type: "disconnect"} : {type: "target", target: modelData.id, keep_pointer: true});
                                 }
                             }
                         }
                     }
-                    Text { textFormat: Text.PlainText; visible: !(page.viewState.targets || []).length; x: 20; y: 120; width: parent.width - 40; text: page.canPair ? (page.viewState.device_management ? "No paired computers.\nOpen All devices to pair." : "No paired computer.\nTap Pair computer to connect.") : "No paired mouse targets.\nPair a computer in Bluetooth settings."; color: page.palette.muted; font.pixelSize: 19; horizontalAlignment: Text.AlignHCenter }
+                    Text { objectName: "emptyTargets"; textFormat: Text.PlainText; visible: !(page.viewState.targets || []).length; x: 20; y: 120; width: parent.width - 40; text: !page.bridge.connected || !page.viewState.core_connected ? "Loading devices…" : page.canPair ? (page.viewState.device_management ? "No paired computers.\nOpen All devices to pair." : "No paired computer.\nTap Pair computer to connect.") : "No paired mouse targets.\nPair a computer in Bluetooth settings."; color: page.palette.muted; font.pixelSize: 19; horizontalAlignment: Text.AlignHCenter }
                 }
             }
             Row {
@@ -218,7 +272,7 @@ Rectangle {
                 anchors.bottomMargin: 0
                 height: 120; spacing: 0
                 Repeater {
-                    model: page.swapClickButtons ? [2, 1] : [1, 2]
+                    model: page.lgTV ? [] : page.swapClickButtons ? [2, 1] : [1, 2]
                     ActionButton {
                         readonly property int mouseButton: modelData
                         objectName: mouseButton === 1 ? "leftClickButton" : "rightClickButton"
@@ -229,6 +283,30 @@ Rectangle {
                         onPressed: page.buttonPressed(mouseButton, true)
                         onReleased: page.buttonReleased(mouseButton, true)
                         onCanceled: page.buttonReleased(mouseButton, true)
+                    }
+                }
+                Repeater {
+                    model: page.lgTV ? ["netflix", "youtube", "steam_machine"] : []
+                    ActionButton {
+                        objectName: modelData + "Shortcut"
+                        width: parent.width / 3; height: parent.height; cornerRadius: 0
+                        Accessible.name: ({netflix:"Netflix", youtube:"YouTube", steam_machine:"Steam Machine"})[modelData]
+                        focusPolicy: Qt.NoFocus
+                        tones: page.palette
+                        background: Rectangle { color: page.palette.card; border.width: 0; opacity: parent.down ? 0.7 : 1 }
+                        contentItem: Item {
+                            Image {
+                                objectName: modelData + "Logo"
+                                anchors.centerIn: parent
+                                width: modelData === "netflix" ? 36 : modelData === "youtube" ? 78 : 58
+                                height: modelData === "netflix" ? 64 : 58
+                                source: Qt.resolvedUrl(modelData + ".svg")
+                                sourceSize: Qt.size(width * 2, height * 2)
+                                fillMode: Image.PreserveAspectFit
+                            }
+                        }
+                        enabled: page.bridge.connected && page.viewState.ready
+                        onClicked: page.direction(modelData)
                     }
                 }
             }
@@ -267,15 +345,17 @@ Rectangle {
                         }
                     }
                 }
-                Text { textFormat: Text.PlainText; text: "Pointer speed"; color: page.palette.fg; font.pixelSize: 17 }
+                Text { visible: !page.lgTV; textFormat: Text.PlainText; text: "Pointer speed"; color: page.palette.fg; font.pixelSize: 17 }
+                Text { visible: page.lgTV; textFormat: Text.PlainText; width: parent.width; wrapMode: Text.WordWrap; text: "Adjust pointer speed in the LG TV settings."; color: page.palette.muted; font.pixelSize: 15 }
                 RateSlider {
+                    visible: !page.lgTV
                     tones: page.palette;
                     objectName: "speedSlider"; width: parent.width; from: 10; to: 100; stepSize: 1; settingValue: page.viewState.speed || 60; pending: page.bridge.busy; enabled: page.bridge.connected && !page.bridge.busy
                     onPressedChanged: if (!pressed) page.send({type: "speed", speed: Math.round(value)})
                     onMoved: if (!pressed) page.send({type: "speed", speed: Math.round(value)})
                     ToolTip.visible: pressed; ToolTip.text: Math.round(value) + "%"
                 }
-                Row { width: parent.width; Text { textFormat: Text.PlainText; width: parent.width / 2; text: "Precise"; color: page.palette.muted; font.pixelSize: 12 } Text { textFormat: Text.PlainText; width: parent.width / 2; text: "Fast"; horizontalAlignment: Text.AlignRight; color: page.palette.muted; font.pixelSize: 12 } }
+                Row { visible: !page.lgTV; width: parent.width; Text { textFormat: Text.PlainText; width: parent.width / 2; text: "Precise"; color: page.palette.muted; font.pixelSize: 12 } Text { textFormat: Text.PlainText; width: parent.width / 2; text: "Fast"; horizontalAlignment: Text.AlignRight; color: page.palette.muted; font.pixelSize: 12 } }
                 Row { width: parent.width; Text { textFormat: Text.PlainText; width: parent.width / 2; text: "Output limit"; color: page.palette.fg; font.pixelSize: 17 } Text { textFormat: Text.PlainText; width: parent.width / 2; text: Math.round(outputSlider.value) + " Hz"; horizontalAlignment: Text.AlignRight; color: page.palette.accent; font.pixelSize: 15 } }
                 RateSlider {
                     tones: page.palette; id: outputSlider; objectName: "outputSlider"; width: parent.width; from: 10; to: 1000; stepSize: 10; settingValue: page.viewState.output_rate || 500; pending: page.bridge.busy; enabled: page.bridge.connected && !page.bridge.busy; onPressedChanged: if (!pressed) page.send({type: "output_rate", rate: Math.round(value)}); onMoved: if (!pressed) page.send({type: "output_rate", rate: Math.round(value)}) }

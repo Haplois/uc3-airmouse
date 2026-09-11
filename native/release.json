@@ -2,14 +2,14 @@
   "name": {
     "en": "Air mouse Dock"
   },
-  "version": "0.74.5-airmouse.16",
+  "version": "0.74.5-airmouse.31",
   "description": {
-    "en": "Native Air mouse app with a higher Quick Switch card and more space above the click buttons. Based on Remote UI v0.74.5."
+    "en": "Native Air mouse app launched from a standard button entity. Physical keys and shakes reconnect a dropped Bluetooth link; LG Power also wakes the TV. Based on Remote UI v0.74.5."
   },
   "developer": {
     "name": "haplois"
   },
-  "release_date": "2026-09-08",
+  "release_date": "2026-09-11",
   "requirements": {
     "firmware_version": "=2.10.2"
   }

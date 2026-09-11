@@ -18,6 +18,7 @@ Item {
     property string error: ""
     property string pendingAction: ""
     property bool pairingRequested: false
+    property bool pairingLG: false
     readonly property bool pairingVisible: !!state.pairing || pairingRequested
     property string dragId: ""
     property var originalOrder: []
@@ -71,7 +72,7 @@ Item {
     Component.onCompleted: synchronize()
     Connections {
         target: manager.bridge
-        function onChanged() {
+        function onConnectedChanged() {
             if (!manager.bridge.connected) {
                 manager.dismissKeyboard(); manager.dragId = ""; manager.pendingAction = ""; manager.pairingRequested = false;
                 manager.error = "Air mouse service unavailable"; manager.synchronize();
@@ -91,7 +92,7 @@ Item {
     }
     function submit(command) {
         if (!available || !supported) return;
-        if (command.type === "pair") pairingRequested = true;
+        if (command.type === "pair" || command.type === "pair_lg") { pairingRequested = true; pairingLG = command.type === "pair_lg"; }
         else if (command.type === "cancel_pairing") pairingRequested = false;
         error = ""; pendingAction = command.type; bridge.command(command);
     }
@@ -205,14 +206,21 @@ Item {
         }
         Text { textFormat: Text.PlainText; visible: rows.count === 0; x: 30; y: 175; width: parent.width - 60; text: "No paired computers yet."; horizontalAlignment: Text.AlignHCenter; color: manager.tones.muted; font.pixelSize: 22 }
         ActionButton {
-            objectName: "pairComputerButton"; visible: manager.supported
+            id: pairComputerButton; objectName: "pairComputerButton"; visible: manager.supported
             x: 20; y: Math.max(260, listArea.y + listArea.height + 10); width: parent.width - 40; height: 56
             tones: manager.tones; primary: manager.pairingVisible
             text: manager.pairingVisible ? "Cancel pairing" : "Pair another computer"
             enabled: manager.available && (manager.pairingVisible || rows.count < (manager.state.host_limit || 4))
             onClicked: { manager.managementStarted(); manager.submit({type: manager.pairingVisible ? "cancel_pairing" : "pair"}); }
         }
-        Text { textFormat: Text.PlainText; x: 20; y: Math.max(326, listArea.y + listArea.height + 76); width: parent.width - 40; text: manager.pairingVisible ? "Choose Remote 3 Air mouse on your computer." : manager.supported && rows.count >= (manager.state.host_limit || 4) ? "Four computers saved. Forget one to pair another." : ""; color: manager.tones.muted; font.pixelSize: 15; wrapMode: Text.Wrap }
+        ActionButton {
+            objectName: "pairLGTVButton"; visible: manager.supported && !manager.pairingVisible
+            x: 20; y: pairComputerButton.y + 66; width: parent.width - 40; height: 56
+            tones: manager.tones; text: "Pair LG TV"
+            enabled: manager.available && rows.count < (manager.state.host_limit || 4)
+            onClicked: { manager.managementStarted(); manager.submit({type: "pair_lg"}); }
+        }
+        Text { textFormat: Text.PlainText; x: 20; y: pairComputerButton.y + (manager.pairingVisible ? 66 : 132); width: parent.width - 40; text: manager.pairingVisible ? manager.pairingLG ? "Keep Remote 3 pointed at the TV during IR pairing." : "Choose Remote 3 Air mouse on your computer." : manager.supported && rows.count >= (manager.state.host_limit || 4) ? "Four computers saved. Forget one to pair another." : manager.supported ? "Point Remote 3 at the TV before choosing Pair LG TV." : ""; color: manager.tones.muted; font.pixelSize: 15; wrapMode: Text.Wrap }
     }
     Column {
         visible: manager.mode === "details"; x: 24; y: 20; width: parent.width - 48; spacing: 18

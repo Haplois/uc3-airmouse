@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Exercise the reviewed receiver's local-versus-remote calibration decision."""
+import argparse
+import io
+import json
+from pathlib import Path
+import struct
+
+
+def route(data, slot, remote_scd=True, dual=False):
+    from elftools.elf.elffile import ELFFile
+    from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE
+    from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R4, UC_ARM_REG_R9,
+                                   UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_SP)
+
+    machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    machine.mem_map(0, 0x200000)
+    machine.mem_map(0x300000, 0x20000)
+    for segment in ELFFile(io.BytesIO(data)).iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            machine.mem_write(segment['p_vaddr'], segment.data())
+    context, stack = 0x310000, 0x30e000
+    machine.mem_write(context + 84, struct.pack('<I', slot))
+    machine.reg_write(UC_ARM_REG_R4, context)
+    machine.reg_write(UC_ARM_REG_R9, 0x312000 if remote_scd else 0)
+    machine.reg_write(UC_ARM_REG_SP, stack)
+    result = {}
+
+    def hook(_machine, address, _size, _context):
+        if address == 0x5dbf0:
+            machine.reg_write(UC_ARM_REG_R0, int(dual))
+            machine.reg_write(UC_ARM_REG_PC, machine.reg_read(UC_ARM_REG_LR))
+        elif address == 0x58196:
+            result['route'] = 'remote'
+            machine.emu_stop()
+        elif address == 0x58258:
+            result['route'] = 'local'
+            machine.emu_stop()
+        elif not (0x58188 <= address < 0x58196 or 0xb9664 <= address < 0xb9690):
+            raise ValueError(f'Unexpected calibration route instruction: {address:#x}')
+
+    machine.hook_add(UC_HOOK_CODE, hook)
+    machine.emu_start(0x58189, 0x5825a, count=200)
+    if 'route' not in result:
+        raise ValueError('Calibration route did not resolve')
+    return result['route']
+
+
+def verify(stock, patched):
+    rows = []
+    for slot in (0, 1, 2, 3, 0xffffffff):
+        for remote_scd in (False, True):
+            for dual in (False, True):
+                before = route(stock, slot, remote_scd, dual)
+                after = route(patched, slot, remote_scd, dual)
+                expected = ('local' if slot == 1 and remote_scd and dual else before)
+                if after != expected:
+                    raise ValueError(
+                        f'Unexpected calibration route: {(slot, remote_scd, dual)}: '
+                        f'{before} -> {after}')
+                rows.append({'slot': slot, 'remote_scd': remote_scd,
+                             'dual': dual, 'route': after})
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--require-secondary-local', action='store_true')
+    args = parser.parse_args()
+    result = route(args.binary.read_bytes(), 1, remote_scd=True, dual=True)
+    print(json.dumps({'route': result}))
+    if args.require_secondary_local and result != 'local':
+        parser.exit(1, 'Second slot still requests remote factory calibration\n')
+
+
+if __name__ == '__main__':
+    main()

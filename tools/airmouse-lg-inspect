@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Summarize LG Bluetooth diagnostics without printing keys or packet payloads."""
+import argparse
+import collections
+import json
+import pathlib
+import re
+import struct
+import subprocess
+
+
+def summarize_snoop(data):
+    if len(data) < 16 or data[:8] != b'btsnoop\0':
+        raise ValueError('Expected a Bluetooth snoop capture')
+    version, link_type = struct.unpack_from('>II', data, 8)
+    if (version, link_type) != (1, 1002):
+        raise ValueError('Expected btsnoop version 1 with H4 packets')
+    packets, channels, notifications = collections.Counter(), collections.Counter(), collections.Counter()
+    offset, incomplete, records = 16, False, 0
+    while offset < len(data):
+        if offset + 24 > len(data):
+            incomplete = True
+            break
+        original, length, flags, drops, timestamp = struct.unpack_from('>IIIIQ', data, offset)
+        offset += 24
+        if length > original:
+            raise ValueError('Captured length exceeds original packet length')
+        if offset + length > len(data):
+            incomplete = True
+            break
+        packet = data[offset:offset + length]
+        offset += length
+        records += 1
+        if not packet:
+            continue
+        packets[packet[0]] += 1
+        if packet[0] != 2 or len(packet) < 9:
+            continue
+        handle, acl_length = struct.unpack_from('<HH', packet, 1)
+        if ((handle >> 12) & 3) == 1:
+            continue
+        l2cap_length, channel = struct.unpack_from('<HH', packet, 5)
+        channels[f'{handle & 0xfff}:{channel}'] += 1
+        if acl_length != len(packet) - 5 or l2cap_length != len(packet) - 9:
+            continue
+        if channel == 4 and len(packet) >= 12 and packet[9] in (0x1b, 0x1d):
+            attribute = struct.unpack_from('<H', packet, 10)[0]
+            notifications[f'{handle & 0xfff}:{attribute}:{len(packet) - 12}'] += 1
+    return {
+        'records': records, 'incomplete_tail': incomplete,
+        'packet_types': dict(sorted(packets.items())),
+        'acl_handle_channel_counts': dict(sorted(channels.items())),
+        'att_handle_attribute_payload_length_counts': dict(sorted(notifications.items())),
+    }
+
+
+def summarize_stack(text):
+    identities = re.findall(r'vendor_id = 0x\s*([0-9a-f]+) product_id = 0x\s*([0-9a-f]+)', text, re.I)
+    return {
+        'hid_identities': sorted({f'{int(vid, 16):04x}:{int(pid, 16):04x}' for vid, pid in identities}),
+        'registered_input_report_ids': sorted({int(x) for x in re.findall(r'<--- Register Report ID: (\d+)', text)}),
+        'descriptor_lengths': sorted({int(x) for x in re.findall(r'dscp_len = (\d+)', text)}),
+    }
+
+
+def summarize_monitor(data):
+    if data[:8] != b'AMHCI1\0\0':
+        raise ValueError('Expected an Air mouse HCI monitor capture')
+    offset, records, incomplete = 8, 0, False
+    first, last = None, None
+    opcodes = collections.Counter()
+    notifications = collections.Counter()
+    while offset < len(data):
+        if offset + 12 > len(data):
+            incomplete = True
+            break
+        timestamp, length = struct.unpack_from('>QI', data, offset)
+        offset += 12
+        if offset + length > len(data):
+            incomplete = True
+            break
+        packet = data[offset:offset + length]
+        offset += length
+        if len(packet) < 6:
+            raise ValueError('Monitor record lacks its header')
+        opcode, adapter, payload_length = struct.unpack_from('<HHH', packet)
+        if payload_length != len(packet) - 6:
+            raise ValueError('Monitor payload length mismatch')
+        records += 1
+        first = timestamp if first is None else first
+        last = timestamp
+        opcodes[opcode] += 1
+        if opcode not in (4, 5) or len(packet) < 17:
+            continue
+        acl = packet[6:]
+        handle, acl_length, l2cap_length, channel = struct.unpack_from('<HHHH', acl)
+        if ((handle >> 12) & 3) == 1 or acl_length != len(acl) - 4 or l2cap_length != len(acl) - 8:
+            continue
+        if channel == 4 and acl[8] in (0x1b, 0x1d):
+            attribute = struct.unpack_from('<H', acl, 9)[0]
+            notifications[f'{adapter}:{opcode}:{handle & 0xfff}:{attribute}:{len(acl) - 11}'] += 1
+    return {
+        'records': records, 'incomplete_tail': incomplete,
+        'first_timestamp_ns': first, 'last_timestamp_ns': last,
+        'monitor_opcodes': dict(sorted(opcodes.items())),
+        'att_adapter_direction_connection_attribute_payload_length_counts': dict(sorted(notifications.items())),
+    }
+
+
+def read_remote(host, path):
+    result = subprocess.run(
+        ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+         '-o', 'ConnectTimeout=8', host, 'cat ' + path],
+        check=True, capture_output=True, timeout=20)
+    return result.stdout
+
+
+def summarize_motion_sessions(data, peer, motion_attribute, command_attribute):
+    if data[:8] != b'AMHCI1\0\0':
+        raise ValueError('Expected an Air mouse HCI monitor capture')
+    offset, active, sessions = 8, {}, []
+    sequences = {}
+    while offset + 12 <= len(data):
+        timestamp, length = struct.unpack_from('>QI', data, offset)
+        offset += 12
+        packet = data[offset:offset + length]
+        offset += length
+        if len(packet) != length:
+            break
+        if len(packet) < 6:
+            raise ValueError('Monitor record lacks its header')
+        opcode, adapter, payload_length = struct.unpack_from('<HHH', packet)
+        payload = packet[6:]
+        if payload_length != len(payload):
+            raise ValueError('Monitor payload length mismatch')
+        if opcode == 3:
+            if len(payload) >= 14 and payload[0] == 0x3e and payload[2] in (1, 10) and payload[3] == 0:
+                handle = struct.unpack_from('<H', payload, 4)[0]
+                address = payload[8:14][::-1].hex(':')
+                active.pop((adapter, handle), None)
+                sequences.pop((adapter, handle), None)
+                if address == peer.lower():
+                    session = {'connected_at_ns': timestamp, 'phases': []}
+                    active[adapter, handle] = session
+                    sessions.append(session)
+            elif len(payload) >= 6 and payload[0] == 5 and payload[2] == 0:
+                handle = struct.unpack_from('<H', payload, 3)[0]
+                session = active.pop((adapter, handle), None)
+                if session is not None:
+                    session.update(disconnected_at_ns=timestamp, disconnect_reason=payload[5])
+            continue
+        if opcode not in (4, 5) or len(payload) < 11:
+            continue
+        handle, acl_length, l2cap_length, channel = struct.unpack_from('<HHHH', payload)
+        if (handle >> 12) & 3 == 1 or channel != 4 or acl_length != len(payload) - 4 or l2cap_length != len(payload) - 8:
+            continue
+        session = active.get((adapter, handle & 0xfff))
+        if session is None:
+            continue
+        att_opcode, attribute = struct.unpack_from('<BH', payload, 8)
+        value = payload[11:]
+        command = value[0] if opcode == 4 and att_opcode in (0x12, 0x52) and attribute == command_attribute and len(value) == 1 and value[0] in (1, 2) else None
+        motion = opcode == 5 and att_opcode == 0x1b and attribute == motion_attribute and len(value) == 19
+        if not motion and command is None:
+            continue
+        if command is not None or not session['phases']:
+            session['phases'].append({'started_at_ns': timestamp, 'tv_command': command,
+                                      'motion_reports': 0, 'mode_counts': {}, 'moving_navigation_reports': 0,
+                                      'motion_events': [], 'sequence_gaps': 0, 'repeated_motion_sequences': 0})
+        phase = session['phases'][-1]
+        if motion:
+            mode = str(value[2] & 3)
+            phase['motion_reports'] += 1
+            phase['mode_counts'][mode] = phase['mode_counts'].get(mode, 0) + 1
+            phase['last_motion_at_ns'] = timestamp
+            key = int.from_bytes(value[16:18], 'big')
+            identity = (adapter, handle & 0xfff)
+            if mode == '2' and key in (0x803e, 0x803f):
+                phase['motion_events'].append({'at_ns': timestamp, 'event': 'start' if key == 0x803e else 'stop',
+                                               'sequence': value[1]})
+                if key == 0x803e:
+                    sequences[identity] = value[1]
+            elif mode == '1' and key == 0 and value[18] == 0:
+                previous = sequences.get(identity)
+                if previous is not None:
+                    delta = (value[1] - previous) & 255
+                    phase['sequence_gaps'] += max(0, delta - 1)
+                    phase['repeated_motion_sequences'] += delta == 0
+                sequences[identity] = value[1]
+            gyro = struct.unpack_from('>hhh', value, 4)
+            if mode == '2' and max(abs(axis) for axis in gyro) > 300:
+                phase['moving_navigation_reports'] += 1
+    return sessions
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default='root@10.0.240.2')
+    captures = parser.add_mutually_exclusive_group()
+    captures.add_argument('--snoop', type=pathlib.Path, help='Analyze a saved btsnoop capture instead of SSH')
+    captures.add_argument('--monitor', type=pathlib.Path, help='Analyze an airmouse-lg-record capture instead of SSH')
+    parser.add_argument('--stack-log', type=pathlib.Path, help='Saved stack log, used with a saved capture')
+    parser.add_argument('--peer', help='Add motion sessions for this Bluetooth address from a monitor capture')
+    parser.add_argument('--motion-attribute', type=lambda value: int(value, 0), default=0x22)
+    parser.add_argument('--command-attribute', type=lambda value: int(value, 0), default=0x2c)
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+        parser.error('Expected user@host')
+    if args.stack_log and not (args.snoop or args.monitor):
+        parser.error('--stack-log requires --snoop or --monitor')
+    if args.peer and (not args.monitor or not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', args.peer)):
+        parser.error('--peer requires --monitor and a Bluetooth address')
+    try:
+        if args.snoop or args.monitor:
+            capture = args.monitor or args.snoop
+            summary = summarize_monitor(capture.read_bytes()) if args.monitor else summarize_snoop(capture.read_bytes())
+            stack = args.stack_log.read_text(errors='replace') if args.stack_log else ''
+        else:
+            summary = summarize_snoop(read_remote(args.host, '/var/log/bt_snoop_hci.cfa_MTK'))
+            stack = read_remote(args.host, '/var/log/bt_stack.log_MTK').decode(errors='replace')
+        result = {'monitor' if args.monitor else 'snoop': summary, 'stack': summarize_stack(stack)}
+        if args.peer:
+            result['motion_sessions'] = summarize_motion_sessions(args.monitor.read_bytes(), args.peer, args.motion_attribute, args.command_attribute)
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'LG inspection failed: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

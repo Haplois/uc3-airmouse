@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Send Up/Down through the lab Remote 3 and observe the TV's Linux input events."""
+import argparse
+import json
+from pathlib import Path
+import runpy
+import subprocess
+
+OBSERVE = r'''
+import glob, json, os, select, struct, subprocess, time
+event = struct.Struct('@llHHi')
+fds = {}
+motion = {}
+positions = {}
+pid = subprocess.check_output(['systemctl', 'show', 'lginput2.service', '-p',
+                               'MainPID', '--value'], text=True).strip()
+maps = open('/proc/' + pid + '/maps').read().splitlines()
+base = int(next(line.split('-')[0] for line in maps if line.endswith('/usr/sbin/lginput2')), 16)
+mem = open('/proc/' + pid + '/mem', 'rb', buffering=0)
+receiver = {'device_roots': set(), 'active_motion_contexts': set(),
+            'send_position_count_start': None, 'send_position_count_end': None}
+def receiver_word(offset):
+    mem.seek(base + offset)
+    return struct.unpack('<I', mem.read(4))[0]
+receiver['send_position_count_start'] = receiver_word(0x10b71c)
+for path in glob.glob('/sys/class/input/event*/device/name'):
+    name = open(path).read().strip()
+    if name.startswith('LGE ') or name == 'ClickableMouse':
+        fd = os.open('/dev/input/' + path.split('/')[4], os.O_RDONLY | os.O_NONBLOCK)
+        fds[fd] = ('input', name)
+for path in glob.glob('/sys/class/hidraw/hidraw*/device/uevent'):
+    if 'HID_UNIQ=e8:7c:c2:97:74:5a' in open(path).read():
+        fd = os.open('/dev/' + path.split('/')[4], os.O_RDONLY | os.O_NONBLOCK)
+        fds[fd] = ('hidraw', 'Remote 3')
+print(json.dumps({'ready': True}), flush=True)
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    receiver['device_roots'].add(receiver_word(0xd4140))
+    receiver['active_motion_contexts'].add(receiver_word(0xd4148))
+    ready, _, _ = select.select(list(fds), [], [], .2)
+    for fd in ready:
+        if fds[fd][0] == 'hidraw':
+            data = os.read(fd, 1024)
+            if len(data) == 20 and data[0] == 0xfd:
+                key = int.from_bytes(data[17:19], 'big')
+                if key:
+                    print(json.dumps({'hidraw_key': key, 'length': len(data)}), flush=True)
+            continue
+        data = os.read(fd, event.size * 256)
+        for offset in range(0, len(data), event.size):
+            sec, usec, kind, code, value = event.unpack_from(data, offset)
+            if kind == 1:
+                print(json.dumps({'device': fds[fd][1], 'code': code, 'value': value,
+                                  'event_us': sec * 1000000 + usec}), flush=True)
+            elif kind in (2, 3):
+                name = fds[fd][1]
+                motion[name] = motion.get(name, 0) + 1
+                if kind == 3 and code in (0, 1) and name.startswith('LGE M-RCU - Builtin '):
+                    positions.setdefault(name, {}).setdefault(str(code), set()).add(value)
+for fd in fds:
+    os.close(fd)
+receiver['send_position_count_end'] = receiver_word(0x10b71c)
+mem.close()
+print(json.dumps({'motion_events': motion,
+                  'cursor_coordinate_values': {
+                      name: {code: sorted(values) for code, values in axes.items()}
+                      for name, axes in positions.items()
+                  },
+                  'receiver_motion_state': {
+                      **receiver,
+                      'device_roots': sorted(receiver['device_roots']),
+                      'active_motion_contexts': sorted(receiver['active_motion_contexts']),
+                  }}), flush=True)
+'''
+
+SEND = r'''
+import { HidOutput } from '/mnt/data/airmouse/current/runtime/hid-output.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+const output = new HidOutput();
+output.start();
+try {
+  const deadline = performance.now() + 5000;
+  while (!output.deviceManagement && performance.now() < deadline) await delay(50);
+  const target = output.targets.find(t => t.bluetooth_name === '[LG] webOS TV OLED77G3PSA');
+  if (!target || !output.ready(target.id)) throw new Error('LG TV is not ready on Remote 3');
+  for (const key of ['up', 'down', 'up', 'down']) {
+    await output.key(target.id, key);
+    console.log(JSON.stringify({sent: key}));
+    await delay(500);
+  }
+  if (CHECK_MOTION) {
+    await output.key(target.id, 'home');
+    await delay(300);
+    await output.open(target.id, 1);
+    for (let i = 0; i < 180; i++) {
+      const yaw = i < 80 ? (Math.floor(i / 12) % 2 ? -2500 : 2500) : 1000;
+      output.imu({ generation: 1, time: output.clock() / 1000, axes: [0, 0, yaw, 0, 0, -4096] });
+      await delay(10);
+    }
+    await output.quiesce();
+    console.log(JSON.stringify({sent_motion_samples: 180}));
+  }
+} finally { output.close(); }
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True)
+    parser.add_argument('--remote', required=True)
+    parser.add_argument('--motion', action='store_true',
+                        help='Also send Home and a bounded synthetic gyro sequence; the cursor may move')
+    args = parser.parse_args()
+    observer = None
+    stopped = False
+    try:
+        module = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+        tv, remote = module['TV'](args.tv), module['TV'](args.remote)
+        remote.ssh('systemctl is-active airmouse.service')
+        observer = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                                     tv.host, 'python3 -u -'], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        observer.stdin.write(OBSERVE)
+        observer.stdin.close()
+        if json.loads(observer.stdout.readline()).get('ready') is not True:
+            raise ValueError('TV input observer did not start')
+        stopped = True
+        remote.ssh('systemctl stop airmouse.service')
+        send = SEND.replace('CHECK_MOTION', 'true' if args.motion else 'false')
+        print(remote.ssh('node --input-type=module -', data=send.encode()).strip())
+        rows = [json.loads(line) for line in observer.stdout]
+        if observer.wait(timeout=5) != 0:
+            raise ValueError('TV input observation failed')
+        print(json.dumps({'input_events': rows}, indent=2))
+        by_device = {}
+        for row in rows:
+            if 'device' in row:
+                by_device.setdefault(row['device'], []).append((row['code'], row['value']))
+        expected = [(code, value) for code in (103, 108, 103, 108) for value in (1, 0)]
+        def contains_sequence(events, sequence):
+            position = 0
+            for event in events:
+                if event == sequence[position]:
+                    position += 1
+                    if position == len(sequence):
+                        return True
+            return False
+        if not any(contains_sequence(events, expected) for events in by_device.values()):
+            raise ValueError('TV did not emit the complete Remote 3 key sequence')
+        if args.motion:
+            summaries = [row.get('cursor_coordinate_values', {}) for row in rows]
+            values = next((summary['LGE M-RCU - Builtin [1]'] for summary in summaries
+                           if 'LGE M-RCU - Builtin [1]' in summary), {})
+            changing_axes = [axis for axis in ('0', '1') if len(values.get(axis, [])) >= 2]
+            if not changing_axes:
+                raise ValueError('TV emitted no changing X/Y cursor coordinates from the second slot')
+        print('TV emitted all four key presses and releases'
+              + (' and changing second-slot cursor coordinates.' if args.motion else '.')
+              + ' UI handling is not tested.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            print(error.stderr.decode().strip())
+        parser.exit(1, f'{error}\n')
+    finally:
+        if stopped:
+            remote.ssh('systemctl start airmouse.service')
+        if observer and observer.poll() is None:
+            observer.terminate()
+            observer.wait(timeout=5)
+
+
+if __name__ == '__main__':
+    main()

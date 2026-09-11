@@ -5,10 +5,16 @@ import { MotionFilter, calibrate } from './motion.mjs';
 import { supportedGyroRanges } from './sensor.mjs';
 import { validateOutputRate } from './output-rate.mjs';
 import { ownershipModes } from './bluetooth-ownership.mjs';
+import { targetProfile, lgMotion } from './target-profile.mjs';
+import { wakeOnLAN } from './lg-tv-power.mjs';
+import { MotionActivity } from './power-saving.mjs';
 
 export class Controller {
-  constructor({ sensor, output, configFile, publish = () => {}, save = saveJSON, switchTimeoutMs = 3000, ownership = null, releaseGraceMs = 10_000, ownershipStartupMs = 5_000 }) {
-    Object.assign(this, { sensor, output, configFile, publish, save, ownership, releaseGraceMs });
+  constructor({ sensor, output, configFile, publish = () => {}, save = saveJSON, switchTimeoutMs = 3000, ownership = null, lgPairing = null, wakeTV = wakeOnLAN, power = null, restMs = 15000, releaseGraceMs = 10_000, ownershipStartupMs = 5_000, reconnectHoldMs = 3000, reconnectRetryMs = 30_000 }) {
+    Object.assign(this, { sensor, output, configFile, publish, save, ownership, lgPairing, releaseGraceMs, reconnectHoldMs, reconnectRetryMs });
+    this.lastReconnect = -Infinity; this.reconnectWatch = false; this.reconnectTimer = null;
+    this.wakeTV = wakeTV;
+    this.power = power; this.restMs = restMs; this.resting = false;
     this.config = readJSON(configFile);
     if (this.config.config_version !== 1 || this.config.motion.inactive_profile !== 'restore_previous') throw new Error('Unsupported configuration');
     if (!supportedGyroRanges.includes(this.config.motion.active_profile.gyroscope.range_degrees_per_second)) throw new Error('Unsupported configured gyro range');
@@ -32,6 +38,46 @@ export class Controller {
   }
 
   get ownershipMode() { return this.config.bluetooth?.ownership ?? 'always'; }
+  // The selected computer is saved but its link is down, and nothing else is using the sensor.
+  get disconnected() {
+    return this.output.backend === 'owned' && this.output.connected && !!this.target && this.nativeControl
+      && !this.output.ready(this.target) && !this.output.pairing && !this.switching && !this.calibrating && !this.pointer && !this.resting;
+  }
+
+  // Reconnect on demand. A peripheral cannot dial the host; this restarts the daemon's fast
+  // advertising window and, for an LG TV, lets the TV-side helper's connect retry find the remote.
+  // Rate-limited so a run of key presses or a long shake sends one request.
+  requestReconnect(reason) {
+    if (!this.disconnected || typeof this.output.reconnect !== 'function') return Promise.resolve(false);
+    const now = performance.now();
+    if (now - this.lastReconnect < this.reconnectHoldMs) return Promise.resolve(false);
+    this.lastReconnect = now;
+    this.ownershipStatus ||= '';
+    this.reconnectReason = reason; this.changed();
+    return this.output.reconnect().then(() => true, error => { this.error = error.message; this.changed(); return false; });
+  }
+
+  // While disconnected with the app open, retry on a timer as well as on a shake or key press. The
+  // daemon's fast advertising window lasts 30 s after each restart or request; a host that was busy or
+  // asleep during that window otherwise waits for the user. The wake input is the same one LG rest
+  // uses; it is only watched when nothing else owns the sensor reader.
+  syncReconnectWatch() {
+    const want = this.disconnected;
+    if (want && !this.reconnectTimer) {
+      this.reconnectTimer = setInterval(() => { if (this.disconnected) this.requestReconnect('retry'); else this.syncReconnectWatch(); }, this.reconnectRetryMs);
+      this.reconnectTimer.unref?.();
+    } else if (!want && this.reconnectTimer) { clearInterval(this.reconnectTimer); this.reconnectTimer = null; }
+    const watch = want && typeof this.sensor.watchWake === 'function';
+    if (watch === this.reconnectWatch) return;
+    this.reconnectWatch = watch;
+    if (!watch) { if (!this.pointer && !this.resting && !this.calibrating) this.sensor.closeReader?.(); return; }
+    try {
+      this.sensor.watchWake(() => { this.requestReconnect('shake'); }, () => { this.reconnectWatch = false; });
+    } catch { this.reconnectWatch = false; }
+  }
+  get lg() { return this.output.backend === 'owned' && targetProfile(this.output.targets.find(t => t.id === this.target)) === 'lg-tv'; }
+  get sampling() { return samplingPolicy(this.lg ? 100 : this.outputRate, this.rates); }
+  get activeRate() { return this.lg ? this.sampling.selected : this.rate; }
 
   // Bluetooth ownership policy. `always`: own the stack whenever the service runs. `session`: own it
   // while the app is open, release it a grace period after close. `never`: leave stock Bluetooth alone.
@@ -68,13 +114,15 @@ export class Controller {
       theme: this.config.ui.theme ?? 'black',
       swap_click_buttons: this.config.ui.swap_click_buttons === true,
       speed: Math.max(10, Math.min(100, Math.round((this.currentTuning().sensitivity ?? this.config.motion.filter.sensitivity) / 30))),
-      sampling_policy: samplingPolicy(this.outputRate, this.rates),
-      applied_sampling: this.pointer || this.calibrating ? this.rate : null,
+      sampling_policy: this.sampling,
+      applied_sampling: this.pointer || this.calibrating ? this.activeRate : null,
       calibrating: this.calibrating, error: this.error,
-      pointer: this.pointer, pointer_enabled: this.pointer || !!this.switching?.resume,
+      pointer: this.pointer, pointer_enabled: this.pointer || this.resting || !!this.switching?.resume,
+      resting: this.resting,
       switching: !!this.switching, last_switch_ms: this.lastSwitchMs, generation: this.generation, target: this.target,
       target_name: target?.name ?? '', targets: this.output.targets,
-      rate: this.rate, rates: this.rates, core_connected: this.output.connected,
+      target_profile: ownedBluetooth ? targetProfile(target) : 'computer',
+      rate: this.activeRate, rates: this.rates, core_connected: this.output.connected,
       bluetooth_backend: this.output.backend ?? 'core', button_edges: this.output.buttonEdges === true,
       paired: ownedBluetooth && !!this.output.paired, pairing: ownedBluetooth && !!this.output.pairing,
       device_management: ownedBluetooth && this.output.deviceManagement === true,
@@ -83,8 +131,9 @@ export class Controller {
       output_rate: this.outputRate,
       gyro_range_degrees_per_second: this.config.motion.active_profile.gyroscope.range_degrees_per_second,
       control_connected: !!this.nativeControl, ready: this.nativeControl && this.output.ready(this.target),
-      status: this.error || (this.switching ? 'Connecting' : this.calibrating ? 'Keep still' : this.pointer ? 'Pointing' : !this.output.connected ? ownedBluetooth ? 'Bluetooth service unavailable' : 'Core unavailable' : ownedBluetooth && this.output.pairing ? 'Pairing' : ownedBluetooth && !this.output.paired ? 'Pair a computer' : !this.target ? 'Select a target' : this.output.ready(this.target) ? 'Ready' : 'Target unavailable'),
+      status: this.error || (this.switching ? 'Connecting' : this.calibrating ? 'Keep still' : this.resting ? 'Resting' : this.pointer ? 'Pointing' : !this.output.connected ? ownedBluetooth ? 'Bluetooth service unavailable' : 'Core unavailable' : ownedBluetooth && this.output.pairing ? 'Pairing' : ownedBluetooth && !this.output.paired ? 'Pair a computer' : !this.target ? 'Select a target' : this.output.ready(this.target) ? 'Ready' : 'Target unavailable'),
       stop_reason: this.reason, output_uncertain: this.output.uncertain,
+      reconnecting: this.disconnected && performance.now() - this.lastReconnect < 30_000,
       bluetooth_ownership: this.ownershipMode, ownership_status: this.ownershipStatus ?? '',
       output_metrics: this.output.metrics?.() ?? null,
     };
@@ -94,10 +143,11 @@ export class Controller {
 
   syncOutput() {
     if (this.output.backend !== 'owned' || this.output.deviceManagement !== true) return;
+    queueMicrotask(() => this.syncReconnectWatch());
     if (this.switching && !this.output.connected) this.stop('Bluetooth service unavailable').catch(() => {});
     const selected = this.output.selectedTarget ?? '';
     if (selected !== this.target) {
-      if (this.pointer || this.calibrating || this.output.endpoint || this.sensor.record) this.stop('Bluetooth target changed').catch(() => {});
+      if (this.pointer || this.resting || this.calibrating || this.output.endpoint || this.sensor.record) this.stop('Bluetooth target changed').catch(() => {});
       this.target = selected;
     }
     this.migrateLegacyTuning();
@@ -120,25 +170,29 @@ export class Controller {
   }
 
   stop(reason = 'Pointer off') {
+    this.pairingAbort?.abort();
     clearTimeout(this.switching?.timer);
     this.switching?.abort.abort(); this.switching = null;
     this.generation++;
     this.pointer = false; this.calibrating = false; this.reason = reason;
+    this.resting = false; this.power?.update(false);
     clearTimeout(this.idle);
     this.output.invalidate(this.generation);
+    this.reconnectWatch = false;
     try { this.sensor.restore(); } catch (error) { this.error = error.message; }
     this.changed();
     this.cleanup = this.output.quiesce();
-    this.cleanup.catch(error => { this.error = error.message; this.changed(); });
+    this.cleanup.catch(error => { this.error = error.message; this.changed(); }).then(() => this.syncReconnectWatch());
     return this.cleanup;
   }
 
   // The native UI layer reports its ownership here; only the controller writes control state.
-  acquireControl() { this.nativeControl = true; this.takeoverAttempted = false; this.applyOwnership(); }
-  releaseControl(reason) { this.nativeControl = false; const stopped = this.stop(reason); this.applyOwnership(); return stopped; }
+  acquireControl() { this.nativeControl = true; this.takeoverAttempted = false; this.applyOwnership(); this.syncReconnectWatch(); }
+  releaseControl(reason) { this.nativeControl = false; const stopped = this.stop(reason); this.applyOwnership(); this.syncReconnectWatch(); return stopped; }
 
   apply(command) {
     if (command.type === 'off') return this.stop();
+    if (command.type === 'cancel_pairing') this.pairingAbort?.abort();
     // Capacity is checked before any command may stop pointing, so a rejected request changes nothing.
     if (this.queued >= 16) return Promise.reject(new Error('Control queue full'));
     const managed = this.output.backend === 'owned' && this.output.deviceManagement === true;
@@ -146,7 +200,7 @@ export class Controller {
     let transfer;
     if (command.type === 'target' && command.id !== this.target) {
       if (command.id && !this.output.targets.some(t => t.id === command.id)) return Promise.reject(new Error('Unknown target'));
-      const resume = command.keep_pointer === true && (this.pointer || !!this.switching?.resume);
+      const resume = command.keep_pointer === true && (this.pointer || this.resting || !!this.switching?.resume);
       this.stop('Target changed');
       if (managed && command.keep_pointer === true) {
         transfer = { target: command.id, resume, generation: this.generation, started: performance.now(), abort: new AbortController() };
@@ -160,8 +214,8 @@ export class Controller {
         this.switching = transfer; this.changed();
       }
     }
-    if ((this.output.backend === 'owned' && command.type === 'pair') || (managed && command.type === 'forget')) {
-      this.stop(command.type === 'pair' ? 'Pairing' : 'Forgetting device');
+    if ((this.output.backend === 'owned' && ['pair', 'pair_lg'].includes(command.type)) || (managed && command.type === 'forget')) {
+      this.stop(['pair', 'pair_lg'].includes(command.type) ? 'Pairing' : 'Forgetting device');
     }
     if (command.type === 'disconnect') this.stop('Computer disconnected');
     const generation = this.generation;
@@ -169,6 +223,19 @@ export class Controller {
     const task = this.queue.then(async () => {
       if (generation !== this.generation) throw new Error('Command invalidated by stop');
       switch (command.type) {
+        case 'power': {
+          const target = this.output.targets.find(target => target.id === this.target);
+          if (!this.nativeControl || this.output.backend !== 'owned' || targetProfile(target) !== 'lg-tv') throw new Error('TV power requires an active LG TV profile');
+          if (this.output.ready(this.target)) return this.output.key(this.target, 'power');
+          // The TV may be off or merely out of Bluetooth range. Wake it over the network either way,
+          // and ask for a Bluetooth reconnect so a TV that is already on picks the remote back up.
+          void this.requestReconnect('power');
+          return this.wakeTV(this.config.lg_tv_power?.[this.target]);
+        }
+        case 'reconnect': {
+          if (!(await this.requestReconnect(command.reason ?? 'button'))) throw new Error(this.disconnected ? 'Reconnect already requested' : 'Bluetooth target is not disconnected');
+          return;
+        }
         case 'disconnect': {
           if (!managed || typeof this.output.disconnectTarget !== 'function') throw new Error('Disconnect requires Bluetooth device management');
           await this.cleanup;
@@ -180,10 +247,16 @@ export class Controller {
         }
         case 'key': {
           if (typeof this.output.key !== 'function') throw new Error('Arrow keys require the owned Bluetooth backend');
+          if (this.disconnected) { await this.requestReconnect('button'); throw new Error('Reconnecting to the selected computer'); }
+          if (this.resting) await this.activate();
+          if (this.pointer) this.touch();
           return this.output.key(this.target, command.key);
         }
         case 'media': {
           if (typeof this.output.media !== 'function') throw new Error('Media controls require the owned Bluetooth backend');
+          if (this.disconnected) { await this.requestReconnect('button'); throw new Error('Reconnecting to the selected computer'); }
+          if (this.resting) await this.activate();
+          if (this.pointer) this.touch();
           return this.output.media(this.target, command.key);
         }
         case 'on': return this.activate();
@@ -232,6 +305,7 @@ export class Controller {
         }
         case 'speed': {
           if (!Number.isInteger(command.speed) || command.speed < 10 || command.speed > 100) throw new Error('Speed must be 10–100');
+          if (this.output.backend === 'owned' && targetProfile(this.output.targets.find(target => target.id === this.target)) === 'lg-tv') throw new Error('Adjust pointer speed in the LG TV settings');
           if (this.pointer) throw new Error('Pause pointing before changing speed');
           if (!this.target) throw new Error('Select a target before changing speed');
           const tuning = { ...this.config.target_tuning, [this.target]: { ...this.config.target_tuning?.[this.target], sensitivity: command.speed * 30 } };
@@ -251,11 +325,24 @@ export class Controller {
           this.changed(); return;
         }
         case 'calibrate': return this.calibrate();
+        case 'pair_lg':
         case 'pair': {
           if (this.output.backend !== 'owned' || typeof this.output.pair !== 'function') throw new Error('Pairing is unavailable for this Bluetooth backend');
           await this.cleanup;
-          try { await this.output.pair(); this.error = ''; this.changed(); return; }
-          catch (error) { this.error = error.message; this.changed(); throw error; }
+          if (generation !== this.generation) return;
+          const abort = new AbortController();
+          this.pairingAbort = abort;
+          try {
+            if (command.type === 'pair_lg') {
+              if (!this.lgPairing) throw new Error('LG infrared pairing is unavailable');
+              await this.lgPairing.pair(this.output, abort.signal);
+            } else await this.output.pair('computer');
+            if (generation === this.generation) { this.error = ''; this.changed(); }
+            return;
+          } catch (error) {
+            if (generation === this.generation) { this.error = error.message; this.changed(); }
+            throw error;
+          } finally { if (this.pairingAbort === abort) this.pairingAbort = null; }
         }
         case 'rename': {
           if (!managed || typeof this.output.rename !== 'function') throw new Error('Bluetooth device management is unavailable');
@@ -332,6 +419,8 @@ export class Controller {
   }
 
   async button(button, down) {
+    if (down && this.disconnected) { await this.requestReconnect('button'); throw new Error('Reconnecting to the selected computer'); }
+    if (down && this.resting) await this.activate();
     if (![1, 2].includes(button) || typeof down !== 'boolean') throw new Error('Invalid mouse button edge');
     if (!this.output.buttonEdges || typeof this.output.button !== 'function') throw new Error('Mouse button edges are unavailable');
     if (!this.pointer) {
@@ -357,13 +446,16 @@ export class Controller {
     const generation = this.generation;
     await this.cleanup.catch(() => this.output.quiesce());
     if (generation !== this.generation) return;
+    if (this.disconnected) { await this.requestReconnect('button'); throw new Error('Reconnecting to the selected computer'); }
     if (!this.nativeControl || !this.output.ready(this.target)) throw new Error('Control or Bluetooth target unavailable');
-    if (!this.rates.includes(this.rate)) throw new Error('Configured sampling rate is unsupported');
+    this.reconnectWatch = false;
+    if (!this.rates.includes(this.activeRate)) throw new Error('Configured sampling rate is unsupported');
     if (this.output.uncertain) throw new Error('Previous output delivery is unresolved');
     try {
       await this.output.prepare?.(this.target);
       if (generation !== this.generation) return;
-      this.sensor.begin(this.rate, this.config.motion.active_profile.gyroscope.range_degrees_per_second);
+      this.sensor.closeReader?.();
+      this.sensor.begin(this.activeRate, this.config.motion.active_profile.gyroscope.range_degrees_per_second);
       await yieldIO();
       if (generation !== this.generation) return;
       await this.output.open(this.target, generation);
@@ -378,19 +470,50 @@ export class Controller {
   resume(generation) {
     const targetTuning = this.currentTuning();
     this.filter = new MotionFilter({ ...this.config.motion.filter, ...targetTuning, bias: this.config.motion.bias ?? [0, 0, 0], generation });
+    const lg = this.lg;
+    this.activity = new MotionActivity(this.config.motion.bias);
     this.sensor.start(generation, samples => {
       if (!this.pointer || generation !== this.generation) return;
       for (const sample of samples) {
-        const delta = this.filter.step(sample);
-        if (delta && (delta.dx || delta.dy)) { this.output.move(delta); this.touch(); }
+        if (lg) {
+          this.output.imu(lgMotion(sample, this.config.motion.bias ?? [0, 0, 0]));
+          if (this.activity.moving(sample)) this.touch();
+        } else {
+          const delta = this.filter.step(sample);
+          if (delta && (delta.dx || delta.dy)) { this.output.move(delta); this.touch(); }
+        }
       }
     }, error => { this.error = error.message; this.stop('Sensor failed'); });
-    this.pointer = true; this.error = ''; this.touch(); this.changed();
+    this.pointer = true; this.resting = false; this.error = ''; this.power?.update(true); this.touch(); this.changed();
   }
 
   touch() {
     clearTimeout(this.idle);
+    if (this.lg) {
+      this.idle = setTimeout(() => this.rest().catch(error => { this.error = error.message; this.stop('Rest failed'); }), this.restMs);
+      return;
+    }
     this.idle = setTimeout(() => this.stop('Idle timeout'), this.config.motion.idle_timeout_seconds ? this.config.motion.idle_timeout_seconds * 1000 : 60_000);
+  }
+
+  async rest() {
+    if (!this.pointer || !this.lg) return;
+    if (this.output.buttons || this.output.desiredButtons) { this.touch(); return; }
+    const generation = ++this.generation;
+    this.pointer = false; this.resting = true; this.reason = 'Resting';
+    clearTimeout(this.idle); this.power?.update(false);
+    this.output.invalidate(generation);
+    this.sensor.restore();
+    this.cleanup = this.output.quiesce();
+    this.changed();
+    await this.cleanup;
+    if (generation !== this.generation || !this.resting) return;
+    this.sensor.watchWake(() => {
+      if (this.resting && generation === this.generation && this.nativeControl && this.output.ready(this.target)) {
+        this.sensor.closeReader();
+        this.apply({ type: 'on' }).catch(error => { this.error = error.message; this.stop('Wake failed'); });
+      }
+    }, error => { this.error = error.message; this.stop('Wake sensor failed'); });
   }
 
   async calibrate() {
@@ -399,9 +522,10 @@ export class Controller {
     this.calibrating = true; this.changed();
     let samples = [], failure;
     try {
-      this.sensor.begin(this.rate, this.config.motion.active_profile.gyroscope.range_degrees_per_second);
+      this.power?.update(true);
+      this.sensor.begin(this.activeRate, this.config.motion.active_profile.gyroscope.range_degrees_per_second);
       this.sensor.start(generation, batch => {
-        if (generation === this.generation && samples.length < this.rate * 2) samples.push(...batch);
+        if (generation === this.generation && samples.length < this.activeRate * 2) samples.push(...batch);
       }, error => { failure = error; this.stop('Sensor failed'); });
       await delay(1500);
       if (failure) throw failure;

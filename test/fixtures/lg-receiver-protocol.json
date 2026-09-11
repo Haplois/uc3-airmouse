@@ -1,0 +1,694 @@
+{
+  "schema": 1,
+  "sha256": "c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b",
+  "architecture": "ARM32 Thumb, little-endian",
+  "scope": "Receiver interoperability tables and reviewed instructions; not a complete remote specification",
+  "command_names": [
+    {
+      "entry": "0xbcab4",
+      "command": "0x13",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcabc",
+      "command": "0x14",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcac4",
+      "command": "0x13",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcacc",
+      "command": "0x14",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcad4",
+      "command": "0x19",
+      "name": "getMRCUInfo"
+    },
+    {
+      "entry": "0xbcadc",
+      "command": "0x19",
+      "name": "getMRCUInfo"
+    },
+    {
+      "entry": "0xbcae4",
+      "command": "0x11",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcaec",
+      "command": "0x12",
+      "name": "readFWVer"
+    },
+    {
+      "entry": "0xbcaf4",
+      "command": "0x90",
+      "name": "getLiquidDetect"
+    },
+    {
+      "entry": "0xbcafc",
+      "command": "0x90",
+      "name": "getLiquidDetect"
+    },
+    {
+      "entry": "0xbcb04",
+      "command": "0x17",
+      "name": "getScdInfo"
+    },
+    {
+      "entry": "0xbcb0c",
+      "command": "0x40",
+      "name": "unplugMRCU"
+    },
+    {
+      "entry": "0xbcb14",
+      "command": "0x41",
+      "name": "unplugPMCU"
+    },
+    {
+      "entry": "0xbcb1c",
+      "command": "0x01",
+      "name": "activeMotion"
+    },
+    {
+      "entry": "0xbcb24",
+      "command": "0x93",
+      "name": "otaStandby"
+    },
+    {
+      "entry": "0xbcb2c",
+      "command": "0x61",
+      "name": "transferZipIr"
+    },
+    {
+      "entry": "0xbcb34",
+      "command": "0x62",
+      "name": "saveCodeSet"
+    },
+    {
+      "entry": "0xbcb3c",
+      "command": "0x64",
+      "name": "eraseCodeSet"
+    },
+    {
+      "entry": "0xbcb44",
+      "command": "0x65",
+      "name": "sendIrCode"
+    },
+    {
+      "entry": "0xbcb4c",
+      "command": "0x66",
+      "name": "getCodeSet"
+    },
+    {
+      "entry": "0xbcb54",
+      "command": "0x67",
+      "name": "setStbPwrIr"
+    },
+    {
+      "entry": "0xbcb5c",
+      "command": "0x68",
+      "name": "getStbPwrIr"
+    },
+    {
+      "entry": "0xbcb64",
+      "command": "0x69",
+      "name": "resetPrimaryCodeset"
+    },
+    {
+      "entry": "0xbcb6c",
+      "command": "0x6a",
+      "name": "stopRepeatingIR"
+    },
+    {
+      "entry": "0xbcb74",
+      "command": "0x6b",
+      "name": "resetIRTimer"
+    },
+    {
+      "entry": "0xbcb7c",
+      "command": "0x6c",
+      "name": "setSTBPwrEmergencyIR"
+    },
+    {
+      "entry": "0xbcb84",
+      "command": "0x6d",
+      "name": "getSTBPwrEmergencyIR"
+    },
+    {
+      "entry": "0xbcb8c",
+      "command": "0x6e",
+      "name": "checkBlasgerBatteryLevel"
+    },
+    {
+      "entry": "0xbcb94",
+      "command": "0x71",
+      "name": "sendWritingNFC"
+    },
+    {
+      "entry": "0xbcb9c",
+      "command": "0x73",
+      "name": "setStbPwrControl"
+    },
+    {
+      "entry": "0xbcba4",
+      "command": "0x74",
+      "name": "getStbPwrControl"
+    }
+  ],
+  "response_handlers": [
+    {
+      "entry": "0xbcbac",
+      "command": "0x14",
+      "handler": "lginput_uhid_parser_getRemoteFWver"
+    },
+    {
+      "entry": "0xbcbb4",
+      "command": "0x14",
+      "handler": "lginput_uhid_parser_getRemoteFWver"
+    },
+    {
+      "entry": "0xbcbbc",
+      "command": "0x12",
+      "handler": "lginput_uhid_parser_getRemoteFWver"
+    },
+    {
+      "entry": "0xbcbc4",
+      "command": "0x19",
+      "handler": "lginput_uhid_parser_getRemoteInformation"
+    },
+    {
+      "entry": "0xbcbcc",
+      "command": "0x90",
+      "handler": "lginput_uhid_parser_getLiquidDetectInfo"
+    },
+    {
+      "entry": "0xbcbd4",
+      "command": "0x17",
+      "handler": "lginput_uhid_parser_getSCDdata"
+    },
+    {
+      "entry": "0xbcbdc",
+      "command": "0x40",
+      "handler": "lginput_uhid_parser_setUnplugMRCU"
+    },
+    {
+      "entry": "0xbcbe4",
+      "command": "0x41",
+      "handler": "lginput_uhid_parser_setUnplugMRCU"
+    },
+    {
+      "entry": "0xbcbec",
+      "command": "0x50",
+      "handler": "lginput_uhid_parser_responseToUeiSetData"
+    },
+    {
+      "entry": "0xbcbf4",
+      "command": "0x51",
+      "handler": "lginput_uhid_parser_responseToUeiSendExtractData"
+    },
+    {
+      "entry": "0xbcbfc",
+      "command": "0x61",
+      "handler": "lginput_uhid_parser_responseToUeiSetData"
+    },
+    {
+      "entry": "0xbcc04",
+      "command": "0x62",
+      "handler": "lginput_uhid_parser_responseToUeiSetData"
+    },
+    {
+      "entry": "0xbcc0c",
+      "command": "0x64",
+      "handler": "lginput_uhid_parser_responseToUeiSetData"
+    },
+    {
+      "entry": "0xbcc14",
+      "command": "0x65",
+      "handler": "lginput_uhid_parser_responseToUeiSendExtractData"
+    },
+    {
+      "entry": "0xbcc1c",
+      "command": "0x66",
+      "handler": "lginput_uhid_parser_responseToUeiGetCodeset"
+    },
+    {
+      "entry": "0xbcc24",
+      "command": "0x67",
+      "handler": "lginput_uhid_parser_responseToUeiSetData"
+    },
+    {
+      "entry": "0xbcc2c",
+      "command": "0x68",
+      "handler": "lginput_uhid_parser_responseToUeiGetCodesetNumForStbPwr"
+    },
+    {
+      "entry": "0xbcc34",
+      "command": "0x69",
+      "handler": "lginput_uhid_parser_responseToUeiResetPrimaryCodeset"
+    },
+    {
+      "entry": "0xbcc3c",
+      "command": "0x6a",
+      "handler": "lginput_uhid_parser_responseToUeiStopRepeatingIR"
+    },
+    {
+      "entry": "0xbcc44",
+      "command": "0x6b",
+      "handler": "lginput_uhid_parser_responseToUeiResetPrimaryCodeset"
+    },
+    {
+      "entry": "0xbcc4c",
+      "command": "0x6c",
+      "handler": "lginput_uhid_parser_responseToUeiSetStbPwrEmergencyIR"
+    },
+    {
+      "entry": "0xbcc54",
+      "command": "0x6d",
+      "handler": "lginput_uhid_parser_responseToUeiGetStbPwrEmergencyIR"
+    },
+    {
+      "entry": "0xbcc5c",
+      "command": "0x6e",
+      "handler": "lginput_uhid_parser_checkBatteryLevelForIRB"
+    },
+    {
+      "entry": "0xbcc64",
+      "command": "0x6f",
+      "handler": "lginput_uhid_parser_getQrpReadBack"
+    },
+    {
+      "entry": "0xbcc6c",
+      "command": "0x71",
+      "handler": "lginput_uhid_parser_sendWritingNFC"
+    },
+    {
+      "entry": "0xbcc74",
+      "command": "0x74",
+      "handler": "lginput_uhid_parser_responseToUeiGetSTBPowerControl"
+    },
+    {
+      "entry": "0xbcc7c",
+      "command": "0x73",
+      "handler": "lginput_uhid_parser_responseToUeiSetSTBPowerControl"
+    }
+  ],
+  "uei_command_names": [
+    {
+      "entry": "0xbcc84",
+      "command": "0x61",
+      "name": "transferZipIr"
+    },
+    {
+      "entry": "0xbcc8c",
+      "command": "0x62",
+      "name": "saveCodeSet"
+    },
+    {
+      "entry": "0xbcc94",
+      "command": "0x64",
+      "name": "eraseCodeSet"
+    },
+    {
+      "entry": "0xbcc9c",
+      "command": "0x65",
+      "name": "sendIrCode"
+    },
+    {
+      "entry": "0xbcca4",
+      "command": "0x66",
+      "name": "getCodeSet"
+    },
+    {
+      "entry": "0xbccac",
+      "command": "0x67",
+      "name": "setStbPwrIr"
+    },
+    {
+      "entry": "0xbccb4",
+      "command": "0x68",
+      "name": "getStbPwrIr"
+    },
+    {
+      "entry": "0xbccbc",
+      "command": "0x73",
+      "name": "setStbPwrControl"
+    },
+    {
+      "entry": "0xbccc4",
+      "command": "0x74",
+      "name": "getStbPwrControl"
+    }
+  ],
+  "ble_family_table_names": [
+    {
+      "entry": "0xbbfd4",
+      "name": "LGE MR15RA"
+    },
+    {
+      "entry": "0xbbfec",
+      "name": "LGE SP16A"
+    },
+    {
+      "entry": "0xbc004",
+      "name": "LGE SP16"
+    },
+    {
+      "entry": "0xbc01c",
+      "name": "LGE MR"
+    },
+    {
+      "entry": "0xbc034",
+      "name": "LGE PM"
+    },
+    {
+      "entry": "0xbc04c",
+      "name": "LGE FTV"
+    },
+    {
+      "entry": "0xbc064",
+      "name": "WEE MR"
+    },
+    {
+      "entry": "0xbc07c",
+      "name": "WEE WR"
+    },
+    {
+      "entry": "0xbc094",
+      "name": "LGE IB"
+    },
+    {
+      "entry": "0xbc0ac",
+      "name": "LGE MR18"
+    },
+    {
+      "entry": "0xbc0c4",
+      "name": "LGE MR19"
+    },
+    {
+      "entry": "0xbc0dc",
+      "name": "LGE PM19"
+    },
+    {
+      "entry": "0xbc0f4",
+      "name": "LGE FTV19"
+    },
+    {
+      "entry": "0xbc10c",
+      "name": "WEE MR20"
+    },
+    {
+      "entry": "0xbc124",
+      "name": "LGE MR20"
+    },
+    {
+      "entry": "0xbc13c",
+      "name": "LGE PM20"
+    },
+    {
+      "entry": "0xbc154",
+      "name": "LGE FTV20"
+    },
+    {
+      "entry": "0xbc16c",
+      "name": "LGE IB20"
+    },
+    {
+      "entry": "0xbc184",
+      "name": "LGE MR21"
+    },
+    {
+      "entry": "0xbc19c",
+      "name": "LGE MR21N"
+    },
+    {
+      "entry": "0xbc1b4",
+      "name": "LGE PM21N"
+    },
+    {
+      "entry": "0xbc1cc",
+      "name": "LGE MR22"
+    },
+    {
+      "entry": "0xbc1e4",
+      "name": "LGE MR22N"
+    },
+    {
+      "entry": "0xbc1fc",
+      "name": "LGE PM22N"
+    },
+    {
+      "entry": "0xbc214",
+      "name": "LGE MR23"
+    },
+    {
+      "entry": "0xbc22c",
+      "name": "LGE MR23N"
+    },
+    {
+      "entry": "0xbc244",
+      "name": "LGE PM23N"
+    },
+    {
+      "entry": "0xbc25c",
+      "name": "LGE MR24"
+    },
+    {
+      "entry": "0xbc274",
+      "name": "LGE MR24N"
+    },
+    {
+      "entry": "0xbc28c",
+      "name": "LGE PM24N"
+    },
+    {
+      "entry": "0xbc2a4",
+      "name": "LGE MR25GA"
+    },
+    {
+      "entry": "0xbc2bc",
+      "name": "LGE MR25GB"
+    },
+    {
+      "entry": "0xbc2d4",
+      "name": "LGE MR25JP"
+    },
+    {
+      "entry": "0xbc2ec",
+      "name": "LGE PM25GN"
+    },
+    {
+      "entry": "0xbc304",
+      "name": "LGE MR25LA"
+    }
+  ],
+  "dual_pairing_registration": {
+    "method": "enableDualPairing",
+    "handler": "0x21230",
+    "construction_address": "0x23c30"
+  },
+  "instruction_checks": {
+    "dual_pairing_handler_calls_interface": {
+      "address": "0x21296",
+      "instruction": "bl #0x80ab8"
+    },
+    "dual_pairing_command_calls_setter": {
+      "address": "0x55f0e",
+      "instruction": "bl #0x5dc20"
+    },
+    "supported_remote_checks_dual_mode": {
+      "address": "0x408f0",
+      "instruction": "bl #0x5dbf0"
+    },
+    "dual_mode_selects_second_slot": {
+      "address": "0x408fa",
+      "instruction": "movs r2, #1"
+    },
+    "dual_mode_stores_slot": {
+      "address": "0x408fe",
+      "instruction": "str.w r2, [r3, #0x108]"
+    },
+    "pairing_reads_selected_slot": {
+      "address": "0x4467e",
+      "instruction": "ldr.w r1, [fp, #0x108]"
+    },
+    "pairing_looks_up_selected_device": {
+      "address": "0x44684",
+      "instruction": "bl #0x728dc"
+    },
+    "ble_connection_checks_primary_slot": {
+      "address": "0x62f92",
+      "instruction": "cmp r6, #0"
+    },
+    "ble_secondary_enters_db_repair": {
+      "address": "0x62f94",
+      "instruction": "bne #0x63074"
+    },
+    "ble_db_repair_selects_primary": {
+      "address": "0x630cc",
+      "instruction": "mov r0, sb"
+    },
+    "ble_db_repair_stores_device": {
+      "address": "0x630d2",
+      "instruction": "bl #0x73634"
+    },
+    "ble_db_repair_returns_primary_slot": {
+      "address": "0x630f8",
+      "instruction": "b #0x62f96"
+    },
+    "no_payload_output_report": {
+      "address": "0x6845c",
+      "instruction": "movs r3, #0xf9"
+    },
+    "no_payload_output_length": {
+      "address": "0x6845e",
+      "instruction": "movs r2, #2"
+    },
+    "response_command_offset": {
+      "address": "0x6564c",
+      "instruction": "ldrb r0, [r3, #1]"
+    },
+    "response_dispatch_table_length": {
+      "address": "0x65656",
+      "instruction": "cmp r1, #0x1b"
+    },
+    "voice_payload_length": {
+      "address": "0x4e8be",
+      "instruction": "cmp r1, #0x78"
+    },
+    "device_allocates_own_state": {
+      "address": "0x52624",
+      "instruction": "str r0, [r4, #0x5c]"
+    },
+    "device_creates_button_state": {
+      "address": "0x5263a",
+      "instruction": "bl #0x6d960"
+    },
+    "device_creates_receiver_state": {
+      "address": "0x526fe",
+      "instruction": "bl #0x50a80"
+    },
+    "device_gets_slot_input_handle": {
+      "address": "0x52704",
+      "instruction": "bl #0x6c38c"
+    },
+    "device_stores_input_handle": {
+      "address": "0x5270a",
+      "instruction": "str r0, [r5, #0x78]"
+    }
+  },
+  "functions": {
+    "interpret_ble_motion_packet": {
+      "address": "0x4e540",
+      "size": 868
+    },
+    "interpret_ble_voice_packet": {
+      "address": "0x4e8a4",
+      "size": 212
+    },
+    "lginput_uhid_parser_respond": {
+      "address": "0x655cc",
+      "size": 484
+    },
+    "lginput_uhid_parser_getSCDdata": {
+      "address": "0x6159c",
+      "size": 64
+    },
+    "lginput_motion_set_scd": {
+      "address": "0x57d64",
+      "size": 160
+    },
+    "lginput_uhid_sendData": {
+      "address": "0x682fc",
+      "size": 768
+    },
+    "_uhid_packetizeData": {
+      "address": "0x681ec",
+      "size": 272
+    },
+    "_uhid_parser_getRemoteInformation": {
+      "address": "0x65ea0",
+      "size": 96
+    },
+    "_uhid_parser_getLiquidDetectInfo": {
+      "address": "0x65f00",
+      "size": 340
+    },
+    "_uhid_parser_getRemoteFWver": {
+      "address": "0x68894",
+      "size": 704
+    },
+    "interface_mrcu_enableDualPairing": {
+      "address": "0x80ab8",
+      "size": 140
+    },
+    "lginput_util_setDualPairingMode": {
+      "address": "0x5dc20",
+      "size": 16
+    },
+    "lginput_util_getDualPairingMode": {
+      "address": "0x5dbf0",
+      "size": 16
+    },
+    "xpa_wbs_isSupportedRemocon": {
+      "address": "0x4088c",
+      "size": 232
+    },
+    "xpa_wbs_pairMotionRemocon": {
+      "address": "0x44610",
+      "size": 904
+    },
+    "_uhid_check_mrcu_dev_index": {
+      "address": "0x62f18",
+      "size": 600
+    },
+    "lginput_util_isMagicRemote": {
+      "address": "0x5c5ec",
+      "size": 328
+    },
+    "lginput_util_isBleRemote": {
+      "address": "0x5c734",
+      "size": 228
+    },
+    "lginput_devmngr_command": {
+      "address": "0x55eb0",
+      "size": 448
+    },
+    "_mrcu_state_isLowSignal": {
+      "address": "0x50374",
+      "size": 844
+    },
+    "event_wake_on_shake": {
+      "address": "0x59800",
+      "size": 186
+    },
+    "event_wake_on_shake_init": {
+      "address": "0x59900",
+      "size": 80
+    },
+    "interface_mrcu_cursor_setWakeUpCondition": {
+      "address": "0x82f88",
+      "size": 216
+    },
+    "mrcu_add": {
+      "address": "0x525b8",
+      "size": 708
+    },
+    "mrcu_remove": {
+      "address": "0x51564",
+      "size": 228
+    },
+    "mrcu_state_create": {
+      "address": "0x50a80",
+      "size": 940
+    },
+    "lginput_get_uinput_handle": {
+      "address": "0x6c38c",
+      "size": 180
+    }
+  }
+}

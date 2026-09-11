@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Check the lab TV's Home -> arrows -> OK launch route, not direct app launch.
+
+Uses the user's Home ordering: Recent Input, YouTube, Jellyfin, Twitch, Netflix.
+Starts from HDMI 1 and leaves Netflix open. Does not modify app packages/data.
+"""
+import argparse
+from pathlib import Path
+import runpy
+import subprocess
+
+CHECK = r'''
+import sys, time
+sys.path.insert(0, '/var/lib/webosbrew/airmouse-lg-receiver')
+from startup import api
+def key(value):
+    api('sendSpecialKey', {'key': value}, service='com.webos.service.networkinput')
+    time.sleep(.4)
+api('launch', {'id': 'com.webos.app.hdmi1'}, service='com.webos.service.applicationmanager')
+time.sleep(1)
+for app, position in [('youtube.leanback.v4', 1), ('netflix', 4)]:
+    key('HOME')
+    time.sleep(1)
+    for index in range(position):
+        key('RIGHT')
+    key('ENTER')
+    for attempt in range(30):
+        state = api('getForegroundAppInfo', {}, service='com.webos.service.applicationmanager')
+        if state.get('appId') == app:
+            print('PASS Home -> arrows -> OK: ' + app, flush=True)
+            break
+        time.sleep(.25)
+    else:
+        raise RuntimeError('Home selection did not launch ' + app + '; foreground: ' + str(state))
+    time.sleep(1)
+'''
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True)
+    args = parser.parse_args()
+    TV = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))['TV']
+    try:
+        print(TV(args.tv).ssh('python3 -', data=CHECK.encode()))
+    except subprocess.CalledProcessError as error:
+        print(error.stdout.decode())
+        print(error.stderr.decode())
+        raise SystemExit(error.returncode)
+
+if __name__ == '__main__':
+    main()

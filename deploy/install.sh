@@ -3,6 +3,7 @@ set -eu
 base=${AIRMOUSE_BASE:-/mnt/data/airmouse}
 run_dir=${AIRMOUSE_RUN_DIR:-/run/airmouse}
 unit_dir=${AIRMOUSE_UNIT_DIR:-/etc/systemd/system}
+udev_dir=${AIRMOUSE_UDEV_DIR:-/etc/udev/rules.d}
 release=$1
 case "$release" in *[!a-zA-Z0-9._-]*|'') exit 2;; esac
 new="$base/releases/$release"
@@ -10,7 +11,7 @@ unit="$unit_dir/airmouse.service"
 mkdir -p "$base"
 exec 9>"$base/install.lock"
 flock -n 9
-for file in runtime/main.mjs runtime/bluetooth-journal.mjs runtime/permissions.mjs deploy/ready.mjs deploy/airmouse.service config/airmouse.json; do
+for file in runtime/main.mjs runtime/bluetooth-journal.mjs runtime/permissions.mjs deploy/ready.mjs deploy/airmouse.service deploy/99-airmouse-wake.rules config/airmouse.json; do
   test -f "$new/$file"
 done
 for file in "$new/runtime/"*.mjs "$new/deploy/"*.mjs; do node --check "$file"; done
@@ -29,7 +30,9 @@ if systemctl is-enabled --quiet airmouse.service; then was_enabled=1; fi
 backup=$(mktemp -d "$base/.install.XXXXXX")
 if test -f "$unit"; then cp -p "$unit" "$backup/airmouse.service"; fi
 drop_in="$unit_dir/airmouse.service.d/sensor.conf"
+udev_rule="$udev_dir/99-airmouse-wake.rules"
 if test -f "$drop_in"; then cp -p "$drop_in" "$backup/sensor.conf"; fi
+if test -f "$udev_rule"; then cp -p "$udev_rule" "$backup/99-airmouse-wake.rules"; fi
 stopped=0
 restore_drop_in() {
   if test -f "$backup/sensor.conf"; then
@@ -37,6 +40,18 @@ restore_drop_in() {
   else
     rm -f "$drop_in"
     rmdir "$unit_dir/airmouse.service.d" 2>/dev/null || true
+  fi
+}
+restore_udev_rule() {
+  if test -f "$backup/99-airmouse-wake.rules"; then
+    mkdir -p "$udev_dir" && cp -p "$backup/99-airmouse-wake.rules" "$udev_rule"
+  else
+    rm -f "$udev_rule"
+  fi
+  if test "$udev_dir" = /etc/udev/rules.d; then
+    udevadm control --reload-rules
+    udevadm trigger --action=add --subsystem-match=input
+    udevadm settle
   fi
 }
 rollback() {
@@ -58,6 +73,7 @@ rollback() {
     rm -f "$unit" || return 1
   fi
   restore_drop_in || return 1
+  restore_udev_rule || return 1
   systemctl daemon-reload || return 1
   if test "$was_enabled" = 1; then systemctl enable airmouse.service || return 1; fi
   if test "$was_active" = 1; then
@@ -97,6 +113,13 @@ if test ! -f "$base/state/airmouse.json"; then
   cp "$new/config/airmouse.json" "$base/state/airmouse.json"
   chown airmouse:airmouse "$base/state/airmouse.json"
   chmod 600 "$base/state/airmouse.json"
+fi
+mkdir -p "$udev_dir"
+cp "$new/deploy/99-airmouse-wake.rules" "$udev_rule"
+if test "$udev_dir" = /etc/udev/rules.d; then
+  udevadm control --reload-rules
+  udevadm trigger --action=add --subsystem-match=input
+  udevadm settle
 fi
 AIRMOUSE_UNIT_DIR="$unit_dir" node "$new/runtime/permissions.mjs" prepare
 node "$new/runtime/bluetooth-journal.mjs" "$base/state"

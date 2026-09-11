@@ -78,8 +78,11 @@ The host build runs the state, registry persistence, Bluetooth lifecycle, and lo
 Compatible GATT updates preserve bonded notification subscriptions. The build
 compares the released layouts in `schema/` with the current layout. Existing
 attributes must match exactly, except for the database hash value. Added
-attributes must follow the existing attributes. Startup migrates recognized
-stored hashes before BTstack restores subscriptions. Unknown hashes retain
+attributes must follow the existing attributes. The daemon migrates recognized
+stored hashes before BTstack restores subscriptions. The LG profile has its own
+GATT layout and shares the HID service start handle with the computer profile.
+Switching between the two known layouts preserves per-host subscriptions.
+There is room for eight subscriptions per host, including the LG reports. Unknown hashes retain
 BTstack's normal invalidation behavior. Keep released layout files unchanged.
 Changes to the dynamic HID report descriptor also require compatibility review;
 the GATT layout comparison cannot check that descriptor.
@@ -129,3 +132,10 @@ To measure switching without pointer input, close the Air mouse app and run
 first three saved computers, and restores the original selection. The JSON result
 reports command acknowledgement and ready times. Computer sleep and scanning
 policy affect the result. The tool sends no mouse movement or button commands.
+
+The [LG TV profile](../docs/lg-tv.md) advertises an MR23 identity and uses native
+remote reports. `PAIR_LG` opens its pairing window; `PAIR` opens the computer
+profile window. `IMU 0 gx gy gz ax ay az` carries six signed 16-bit sensor counts
+for an active LG session. `LGKEY id code` submits a supported native key press
+and release. LG connections reject generic `KEY` and `MEDIA` commands and
+ignore `MOVE`. The simulator accepts `--simulate-lg` to exercise this path.

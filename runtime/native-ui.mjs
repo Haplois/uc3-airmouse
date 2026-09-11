@@ -31,7 +31,10 @@ export class NativeUI {
     socket.write(JSON.stringify(message) + '\n');
   }
   publish() {
-    if (this.owner) this.send(this.owner, { state: this.controller.state(), version: 1 });
+    if (this.owner) {
+      const { output_metrics, ...state } = this.controller.state();
+      this.send(this.owner, { state, version: 1 });
+    }
   }
   connect(socket, leaseMs) {
     socket.on('error', () => {});
@@ -102,12 +105,16 @@ export class NativeUI {
       await controller.apply({ type: 'output_policy', rate: command.rate });
     } else if (command.type === 'media' && exactFields(command, ['id', 'type', 'key'])) {
       await controller.apply({ type: 'media', key: command.key });
-    } else if (command.type === 'key' && exactFields(command, ['id', 'type', 'key']) && ['up', 'down', 'left', 'right'].includes(command.key)) {
+    } else if (command.type === 'key' && exactFields(command, ['id', 'type', 'key']) && ['up', 'down', 'left', 'right', 'ok', 'back', 'home', 'settings', 'quick_settings', 'all_settings', 'input_picker', 'hdmi1', 'netflix', 'youtube', 'steam_machine', 'channel_up', 'channel_down', 'input_next', 'input_previous'].includes(command.key)) {
       await controller.apply({ type: 'key', key: command.key });
+    } else if (command.type === 'power' && exactFields(command, ['id', 'type'])) {
+      await controller.apply({ type: 'power' });
     } else if (command.type === 'disconnect' && exactFields(command, ['id', 'type'])) {
       await controller.apply({ type: 'disconnect' });
-    } else if (command.type === 'pair' && exactFields(command, ['id', 'type'])) {
-      await controller.apply({ type: 'pair' });
+    } else if (command.type === 'reconnect' && exactFields(command, ['id', 'type'])) {
+      await controller.apply({ type: 'reconnect', reason: 'button' });
+    } else if (['pair', 'pair_lg'].includes(command.type) && exactFields(command, ['id', 'type'])) {
+      await controller.apply({ type: command.type });
     } else if (command.type === 'rename' && exactFields(command, ['id', 'name', 'target', 'type'])
         && typeof command.target === 'string' && peerPattern.test(command.target) && validName(command.name)) {
       await controller.apply({ type: 'rename', id: command.target, name: command.name });

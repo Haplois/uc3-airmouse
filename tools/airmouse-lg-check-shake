@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Exercise the TV's actual shake instructions offline; never send sensor data."""
+import argparse
+import io
+import json
+from pathlib import Path
+import struct
+
+
+def detect(data, samples, slot=1, dual=True):
+    from elftools.elf.elffile import ELFFile
+    from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE
+    from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_SP,
+                                   UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_C1_C0_2,
+                                   UC_ARM_REG_FPEXC)
+    machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    machine.mem_map(0, 0x200000)
+    machine.mem_map(0x300000, 0x20000)
+    for segment in ELFFile(io.BytesIO(data)).iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            machine.mem_write(segment['p_vaddr'], segment.data())
+    machine.reg_write(UC_ARM_REG_C1_C0_2, 0xf00000)
+    machine.reg_write(UC_ARM_REG_FPEXC, 0x40000000)
+    context, axes, stack, stop = 0x310000, 0x311000, 0x30e000, 0x300000
+    machine.mem_write(0xd65e4, struct.pack('<I', int(dual)))
+    machine.mem_write(context + 0x54, struct.pack('<I', slot))
+    clock = 0
+
+    def hook(_machine, address, _size, _context):
+        if address == 0x5ad60:
+            machine.mem_write(machine.reg_read(UC_ARM_REG_R0), struct.pack('<Q', clock))
+            machine.reg_write(UC_ARM_REG_PC, machine.reg_read(UC_ARM_REG_LR))
+        elif not (0x59798 <= address < 0x59a18 or 0x5dbf0 <= address < 0x5dbfa
+                  or 0xb9640 <= address < 0xb9690):
+            raise ValueError(f'Unexpected detector instruction: {address:#x}')
+
+    machine.hook_add(UC_HOOK_CODE, hook)
+
+    def call(address):
+        machine.reg_write(UC_ARM_REG_R0, context)
+        machine.reg_write(UC_ARM_REG_R1, axes)
+        machine.reg_write(UC_ARM_REG_SP, stack)
+        machine.reg_write(UC_ARM_REG_LR, stop | 1)
+        machine.emu_start(address | 1, stop, count=2000)
+        if machine.reg_read(UC_ARM_REG_PC) != stop:
+            raise ValueError('Detector did not return')
+
+    call(0x599c4)
+    for clock, sample in samples:
+        machine.mem_write(axes, struct.pack('<3i', *sample))
+        call(0x598bc)
+        call(0x59800)
+        result = struct.unpack('<i', machine.mem_read(context + 0x18, 4))[0]
+        if result:
+            return {'result': result, 'time_ms': clock}
+    return {'result': 0, 'time_ms': clock}
+
+
+def shake(amplitude):
+    return [(i * 10, (0, 0, amplitude * (1 if (i // 12) % 2 == 0 else -1)))
+            for i in range(120)]
+
+
+def verify(stock, patched):
+    rows = []
+    gestures = {
+        'gentle_shake': shake(400), 'strong_shake': shake(1800),
+        'below_threshold': shake(375), 'stationary': shake(0),
+        'one_direction': [(i * 10, (0, 0, 400)) for i in range(120)],
+        'single_reversal': [(i * 10, (0, 0, 400 if i < 12 else -400)) for i in range(120)],
+        'too_fast': [(i * 10, (0, 0, 400 if (i // 4) % 2 else 0)) for i in range(120)],
+        'roll_only': [(i * 10, (0, 1800, 0)) for i in range(120)],
+    }
+    for slot in (0, 1, 2, 3, 0xffffffff):
+        for dual in (False, True):
+            for name, samples in gestures.items():
+                before, after = detect(stock, samples, slot, dual), detect(patched, samples, slot, dual)
+                if slot == 1 and dual and name == 'gentle_shake':
+                    if before['result'] != -1 or after['result'] != 1 or after['time_ms'] > 400:
+                        raise ValueError(f'Gentle shake failed: {before} -> {after}')
+                elif slot == 1 and dual and name != 'strong_shake':
+                    if after['result'] != -1:
+                        raise ValueError(f'Unintended cursor wake: {name}: {after}')
+                elif after != before:
+                    raise ValueError(f'Unexpected shake change: {(slot, dual, name)}: {before} -> {after}')
+                rows.append({'slot': slot, 'dual': dual, 'gesture': name, **after})
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--require-gentle', action='store_true')
+    args = parser.parse_args()
+    result = detect(args.binary.read_bytes(), shake(400))
+    print(json.dumps(result))
+    if args.require_gentle and result['result'] != 1:
+        parser.exit(1, 'Gentle shake did not wake the cursor\n')
+
+
+if __name__ == '__main__':
+    main()

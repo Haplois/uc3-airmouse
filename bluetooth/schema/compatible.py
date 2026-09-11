@@ -43,7 +43,7 @@ def compatible(old, new):
 
 
 def main():
-    compiler, current_header, output = map(pathlib.Path, sys.argv[1:])
+    compiler, current_header, output, lg_header = map(pathlib.Path, sys.argv[1:])
     current = attributes(current_header.read_text())
     hashes = []
     with tempfile.TemporaryDirectory() as work:
@@ -60,7 +60,9 @@ def main():
                       'static const uint8_t compatible_hashes[][16] = {' +
                       ','.join(map(array, hashes)) + '};\n'
                       'static const uint8_t current_schema_hash[16] = ' +
-                      array(database_hash(current)) + ';\n')
+                      array(database_hash(current)) + ';\n' +
+                      'static const uint8_t lg_schema_hash[16] = ' +
+                      array(database_hash(attributes(lg_header.read_text()))) + ';\n')
 
 
 if __name__ == '__main__':

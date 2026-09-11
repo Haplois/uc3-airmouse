@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Clear lab Magic Remote bonds and receiver slots, retaining other Bluetooth devices."""
+import argparse
+import json
+from pathlib import Path
+import runpy
+import shlex
+import subprocess
+
+REMOTES = ('30:3f:5d:9d:a4:12', 'e8:7c:c2:97:74:5a')
+ORIGINAL, REMOTE3 = REMOTES
+
+
+def bluetooth(tv, method, payload):
+    response = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 3000 -f '
+                                f'luna://com.webos.service.bluetooth2/{method} '
+                                + shlex.quote(json.dumps(payload)), tty=True))
+    if response.get('returnValue') is not True:
+        raise ValueError(f'Bluetooth {method} failed: {response.get("errorText")}')
+    return response
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='root@lab-TV-host')
+    parser.add_argument('--remote3-only', action='store_true',
+                        help='Clear only Remote 3 and the secondary receiver slot')
+    args = parser.parse_args()
+    try:
+        deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+        tv = deploy['TV'](args.host)
+        digest = tv.ssh('sha256sum /usr/sbin/lginput2').split()[0]
+        if digest not in (deploy['STOCK_SHA256'], deploy['PREVIOUS_SHA256'], deploy['PATCHED_SHA256']):
+            raise ValueError('Unreviewed TV receiver')
+        targets = {REMOTE3} if args.remote3_only else set(REMOTES)
+        tv.api('enableDualPairing', {'enable': False})
+        before = bluetooth(tv, 'device/getStatus', {}).get('devices', [])
+        paired_before = {d['address'].lower() for d in before if d.get('paired')}
+        if args.remote3_only and (ORIGINAL not in paired_before or tv.api('isPaired', {}).get('isPaired') is not True):
+            raise ValueError('Original LG remote is not in the primary slot')
+        others = paired_before - targets
+        for device in before:
+            if device.get('paired') and device['address'].lower() in targets:
+                bluetooth(tv, 'adapter/unpair', {'address': device['address']})
+        # Bluetooth unpair leaves LG's separate receiver records behind. Stop their
+        # writer before moving both slots and their SCD caches to a private backup.
+        slot_files = 'mrcu2.info mrcu2.scd' if args.remote3_only else 'mrcu1.info mrcu2.info mrcu1.scd mrcu2.scd'
+        print(tv.ssh(f'''set -eu
+umask 077
+reset_dir=$(mktemp -d /tmp/airmouse-lg-pairing-reset.XXXXXX)
+systemctl stop lginput2.service
+trap 'systemctl start lginput2.service' EXIT
+for name in {slot_files}; do
+    if test -f /mnt/lg/cmn_data/mrcu/$name; then
+        mv /mnt/lg/cmn_data/mrcu/$name "$reset_dir/$name"
+    fi
+done
+echo "Receiver slot backup: $reset_dir"
+''').strip())
+        tv.api('enableDualPairing', {'enable': args.remote3_only})
+        if tv.api('isPaired', {}).get('isPaired') is not args.remote3_only:
+            raise ValueError('Receiver primary pairing state changed unexpectedly')
+        remaining = tv.ssh('for name in mrcu1.info mrcu2.info; do '
+                           'if test -f /mnt/lg/cmn_data/mrcu/$name; then echo "$name"; fi; done')
+        expected = {'mrcu1.info'} if args.remote3_only else set()
+        if set(remaining.split()) != expected:
+            raise ValueError('Receiver slot cleanup verification failed')
+        after = bluetooth(tv, 'device/getStatus', {}).get('devices', [])
+        paired = {d['address'].lower() for d in after if d.get('paired')}
+        if paired.intersection(targets) or not others.issubset(paired):
+            raise ValueError('Bluetooth pairing verification failed')
+        if args.remote3_only:
+            print('Remote 3 TV bond and secondary receiver slot cleared; original LG remote preserved.')
+        else:
+            print('Both TV receiver slots and remote Bluetooth bonds cleared; other bonds preserved.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'{error}\n')
+
+
+if __name__ == '__main__':
+    main()

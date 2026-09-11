@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Record passive Bluetooth monitor traffic from an LG TV over authorized SSH."""
+import argparse
+import datetime
+import os
+import pathlib
+import re
+import subprocess
+
+REMOTE_RECORDER = r'''
+import ctypes
+import select
+import socket
+import struct
+import sys
+import time
+
+class Address(ctypes.Structure):
+    _fields_ = [('family', ctypes.c_ushort), ('device', ctypes.c_ushort), ('channel', ctypes.c_ushort)]
+
+monitor = socket.socket(31, socket.SOCK_RAW, 1)
+libc = ctypes.CDLL(None, use_errno=True)
+address = Address(31, 0xffff, 2)
+if libc.bind(monitor.fileno(), ctypes.byref(address), ctypes.sizeof(address)) != 0:
+    raise OSError(ctypes.get_errno(), 'Cannot open passive HCI monitor')
+monitor.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+output = sys.stdout.buffer
+output.write(b'AMHCI1\0\0')
+output.flush()
+print('CAPTURE_READY: recording for SECONDS seconds', file=sys.stderr, flush=True)
+deadline = time.monotonic() + SECONDS
+count = 0
+try:
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([monitor], [], [], min(1, max(0, deadline - time.monotonic())))
+        if readable:
+            packet = monitor.recv(65535)
+            output.write(struct.pack('>QI', time.time_ns(), len(packet)))
+            output.write(packet)
+            output.flush()
+            count += 1
+finally:
+    monitor.close()
+print('CAPTURE_COMPLETE: ' + str(count) + ' monitor records', file=sys.stderr, flush=True)
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default='root@10.0.240.2')
+    parser.add_argument('--seconds', type=int, default=120)
+    parser.add_argument('--output', type=pathlib.Path)
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+        parser.error('Expected user@host')
+    if not 1 <= args.seconds <= 600:
+        parser.error('Duration must be between 1 and 600 seconds')
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    destination = args.output or pathlib.Path('/tmp/airmouse-lg-evidence') / f'magic-{stamp}.hci-monitor'
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        print(f'Saving capture to {destination.resolve()}', flush=True)
+        with os.fdopen(fd, 'wb') as output:
+            subprocess.run(
+                ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                 '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=10',
+                 '-o', 'ServerAliveCountMax=2', args.host, 'python3 -u -'],
+                input=REMOTE_RECORDER.replace('SECONDS', str(args.seconds)).encode(),
+                stdout=output, check=True, timeout=args.seconds + 30)
+        print(f'Saved {destination.stat().st_size} bytes', flush=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'LG recording failed; any partial capture remains at {destination}: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

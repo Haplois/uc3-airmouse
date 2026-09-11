@@ -14,10 +14,8 @@ TestCase {
         property bool connected: true
         property bool busy: false
         property var commands: []
-        signal changed()
         signal failed(string message)
         signal commandSucceeded(string type)
-        onConnectedChanged: changed()
         function command(value) { commands.push(value); busy=true; }
     }
     AirMousePage { id: page; bridge: bridge; batteryLevel: 82 }
@@ -27,9 +25,9 @@ TestCase {
         Row {
             anchors.centerIn: parent
             Repeater {
-                model: ["desktop","ipad","iphone","android","phone","laptop"]
+                model: ["desktop","ipad","iphone","android","phone","laptop","lg-tv"]
                 delegate: Item {
-                    width: 76; height: 92
+                    width: 66; height: 92
                     Glyph { anchors.horizontalCenter: parent.horizontalCenter; width: 42; height: 42; kind: modelData; ink: "#f5f1ff" }
                     Text { anchors.bottom: parent.bottom; width: parent.width; text: modelData; color: "#bbb4c8"; font.pixelSize: 13; horizontalAlignment: Text.AlignHCenter }
                 }
@@ -81,6 +79,15 @@ TestCase {
         mouseClick(button); compare(bridge.commands,[{type:"pair"}]);
         complete("pair",{pairing:true}); compare(button.text,"Cancel pairing");
         mouseClick(button); compare(bridge.commands[1],{type:"cancel_pairing"});
+    }
+    function test_pair_lg_profile_and_cancel() {
+        openManager();
+        var lg=findChild(manager,"pairLGTVButton"); compare(lg.enabled,false);
+        update({targets:hosts().slice(0,3)}); verify(lg.enabled); mouseClick(lg);
+        compare(bridge.commands,[{type:"pair_lg"}]); compare(manager.pairingLG,true);
+        complete("pair_lg",{pairing:true}); compare(lg.visible,false);
+        mouseClick(findChild(manager,"pairComputerButton"));
+        compare(bridge.commands[1],{type:"cancel_pairing"});
     }
     function test_pair_ack_does_not_flash_idle_state() {
         openManager(); update({targets:hosts().slice(0,3)});
@@ -183,6 +190,8 @@ TestCase {
     }
     function test_device_icons_follow_bluetooth_names() {
         var cases = [
+            ["TV", "[LG] webOS TV OLED77G3PSA", "lg-tv"],
+            ["Living room", "LG webOS TV OLED55C3", "lg-tv"],
             ["Office", "DESKTOP-ABC", "desktop"],
             ["Renamed iPad", "DESKTOP-ABC", "desktop"],
             ["Tablet", "Alex’s iPad", "ipad"],
@@ -205,6 +214,20 @@ TestCase {
         compare(label.textFormat,Text.PlainText); compare(label.text,"<b>Desk</b>");
         manager.details("00000001"); manager.confirmForget();
         compare(findChild(manager,"forgetComputerQuestion").textFormat,Text.PlainText);
+    }
+    function test_disconnect_clears_pending_actions_and_allows_reconnect() {
+        openManager();
+        manager.pendingAction = "rename";
+        manager.pairingRequested = true;
+        manager.dragId = "00000001";
+        bridge.connected = false;
+        compare(manager.pendingAction, "");
+        compare(manager.pairingRequested, false);
+        compare(manager.dragId, "");
+        verify(manager.error.length > 0);
+        bridge.connected = true;
+        verify(manager.available);
+        compare(manager.back(), false);
     }
     function test_back_and_disconnect_clear_editor_focus() {
         openRename(); var field=findChild(manager,"computerRenameField"); verify(field.activeFocus);

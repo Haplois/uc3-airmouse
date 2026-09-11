@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Save a paired LG TV's Wake-on-LAN destination without changing sensor calibration."""
+import argparse
+import ipaddress
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='Remote 3 SSH destination')
+    parser.add_argument('--target', required=True, help='Saved Bluetooth device ID')
+    parser.add_argument('--mac', required=True, help='TV network MAC, not Bluetooth MAC')
+    parser.add_argument('--broadcast', required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r'[0-9a-f]{8}', args.target):
+        parser.error('Expected an eight-digit Bluetooth device ID')
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', args.mac):
+        parser.error('Expected a six-byte MAC address')
+    if int(args.mac[:2], 16) & 1 or int(args.mac.replace(':', ''), 16) == 0:
+        parser.error('Expected a unicast MAC address')
+    try:
+        ipaddress.IPv4Address(args.broadcast)
+    except ValueError:
+        parser.error('Expected an IPv4 broadcast address')
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    remote = deploy['TV'](args.host)
+    configuration = json.dumps({'target': args.target, 'mac': args.mac.lower(), 'broadcast': args.broadcast})
+    script = '''
+import fs from 'node:fs';
+import { targetProfile } from '/mnt/data/airmouse/current/runtime/target-profile.mjs';
+const settings = CONFIGURATION;
+const base = '/mnt/data/airmouse/state';
+const state = JSON.parse(fs.readFileSync(`${base}/status.json`));
+if (targetProfile(state.targets.find(target => target.id === settings.target)) !== 'lg-tv') throw new Error('Target is not a saved LG TV');
+const file = `${base}/airmouse.json`;
+const stat = fs.statSync(file);
+const config = JSON.parse(fs.readFileSync(file));
+config.lg_tv_power = {...config.lg_tv_power, [settings.target]: {mac: settings.mac, broadcast: settings.broadcast}};
+const temporary = `${file}.lg-power-${process.pid}`;
+try {
+  fs.writeFileSync(temporary, JSON.stringify(config, null, 2) + '\\n', {mode: 0o600, flag: 'wx'});
+  fs.chownSync(temporary, stat.uid, stat.gid);
+  fs.renameSync(temporary, file);
+} finally { fs.rmSync(temporary, {force: true}); }
+console.log('Saved LG TV wake destination; calibration retained');
+'''.replace('CONFIGURATION', configuration)
+    stopped = False
+    try:
+        remote.ssh('systemctl is-active airmouse.service')
+        stopped = True
+        remote.ssh('systemctl stop airmouse.service')
+        print(remote.ssh('node --input-type=module -', data=script.encode()))
+    except (OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Could not configure TV wake: {error}\n')
+    finally:
+        if stopped:
+            remote.ssh('systemctl start airmouse.service')
+
+
+if __name__ == '__main__':
+    main()

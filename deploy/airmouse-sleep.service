@@ -1,0 +1,15 @@
+[Unit]
+Description=Quiesce Air mouse before system sleep and restore it after wake
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /mnt/data/airmouse/sleep.sh pre
+ExecStopPost=/bin/sh /mnt/data/airmouse/sleep.sh post
+TimeoutStartSec=40
+TimeoutStopSec=10
+
+[Install]
+WantedBy=sleep.target

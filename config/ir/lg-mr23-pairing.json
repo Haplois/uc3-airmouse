@@ -1,0 +1,23 @@
+{
+  "name": "LG MR23 Magic Remote registration",
+  "format": "HEX",
+  "code": "3;0x20DFC13E;32;0",
+  "repeat": 0,
+  "protocol": "NEC",
+  "command": "0x83",
+  "address": "0x04",
+  "provenance": {
+    "kind": "reconstructed_from_captured_decoded_command",
+    "captured_at": "2026-09-08T12:28:23.609755Z",
+    "tv_model": "OLED77G3PSA",
+    "remote_model": "LGE MR23",
+    "micom_input_keycode": "0x83",
+    "linux_input_keycode": "0x405",
+    "tv_registration_started_at": "2026-09-08T12:28:23.610460Z",
+    "tv_registration_succeeded_at": "2026-09-08T12:28:25.955213Z",
+    "code_reference": "https://gist.github.com/ledoge/ab78723efdaa00e6815e30d1792790fd",
+    "reference_name": "IR_KEY_PAIRING_SP",
+    "raw_pulse_timings_measured": false,
+    "capture_excerpt": "MICOM_REMOTE_SINGLE_KEY: input keycode:0x83, output keycode:0x405"
+  }
+}

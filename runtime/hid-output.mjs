@@ -1,5 +1,7 @@
 import net from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { validateOutputRate } from './output-rate.mjs';
+import { targetProfile, arrowKeys, lgKeys, lgMediaKeys } from './target-profile.mjs';
 
 const targetID = 'airmouse.host';
 const requiredStateKeys = ['active', 'buttons', 'dropped_motion', 'error', 'interval_ms', 'paired', 'pairing', 'ready', 'reports_sent'];
@@ -76,6 +78,7 @@ export class HidOutput {
     this.endpoint = null; this.sessionTarget = null; this.generation = 0; this.desiredButtons = 0; this.sessionMayBeActive = false;
     this.pendingRequests = new Map(); this.ignoredResponses = new Set(); this.nextID = 1; this.buffer = Buffer.alloc(0); this.closed = false; this.started = false;
     this.movementRateHz = movementRateHz; this.movementIntervalMs = 1000 / movementRateHz;
+    this.lgSamples = []; this.lastLgSample = -Infinity; this.lastLgBucket = -Infinity;
     this.pendingMovement = null; this.lastMovement = -Infinity; this.nextMovement = -Infinity; this.pace = null;
     this.sentMovement = 0; this.dropped = 0; this.uncertain = false; this.quiescing = null;
   }
@@ -94,7 +97,6 @@ export class HidOutput {
     this.socket = socket; this.buffer = Buffer.alloc(0);
     socket.on('connect', () => {
       if (this.socket !== socket || this.closed) return socket.destroy();
-      this.connected = true; this.publish();
       this.writeLine('PING 0\n', false);
       this.heartbeat = setInterval(() => this.writeLine('PING 0\n', false), this.heartbeatMs);
     });
@@ -130,7 +132,7 @@ export class HidOutput {
       this.targets[0] = { ...this.targets[0], ready: false, connected: false };
     }
     this.endpoint = null; this.sessionTarget = null; this.desiredButtons = 0; this.sessionMayBeActive = false;
-    this.pendingMovement = null; clearTimeout(this.pace); this.pace = null;
+    this.pendingMovement = null; this.lgSamples = []; this.lastLgSample = this.lastLgBucket = -Infinity; clearTimeout(this.pace); this.pace = null;
     if (shouldStop) this.onStop(reason);
     this.publish(); this.scheduleRetry();
   }
@@ -181,6 +183,7 @@ export class HidOutput {
   }
 
   acceptState(state, version = 1) {
+    this.connected = true;
     const wasReady = this.daemon.ready, wasActive = this.daemon.active, endpointID = this.endpoint?.id ?? this.sessionTarget;
     this.daemon = { ...state };
     this.paired = state.paired; this.pairing = state.pairing; this.active = state.active; this.buttons = state.buttons;
@@ -215,7 +218,7 @@ export class HidOutput {
   writeLine(line, critical) {
     if (Buffer.byteLength(line) > 128) throw new Error('Bluetooth command exceeds protocol limit');
     const socket = this.socket;
-    if (!this.connected || !socket || socket.destroyed || !socket.writable) return false;
+    if ((!this.connected && line !== 'PING 0\n') || !socket || socket.destroyed || !socket.writable) return false;
     if (socket.writableLength + Buffer.byteLength(line) > 4096) {
       if (critical) this.abort('Bluetooth command buffer full');
       return false;
@@ -273,11 +276,12 @@ export class HidOutput {
   setMovementRate(rate) {
     validateOutputRate(rate);
     this.movementRateHz = rate; this.movementIntervalMs = 1000 / rate;
-    this.nextMovement = this.lastMovement + this.movementIntervalMs;
+    this.nextMovement = this.lastMovement + (targetProfile(this.endpoint) === 'lg-tv' ? 10 : this.movementIntervalMs);
     clearTimeout(this.pace); this.pace = null; this.scheduleFlush();
   }
 
   move(delta) {
+    if (targetProfile(this.endpoint) === 'lg-tv') return;
     if (delta.generation !== this.generation || !this.endpoint || this.quiescing || !this.ready(this.endpoint.id)) return;
     const now = this.clock() / 1000;
     if (now - delta.time > 0.075 || delta.time > now + 0.005) { this.dropped++; return; }
@@ -292,8 +296,26 @@ export class HidOutput {
     this.scheduleFlush();
   }
 
+  imu(sample) {
+    if (!sample || sample.generation !== this.generation || targetProfile(this.endpoint) !== 'lg-tv' || this.quiescing || !this.ready(this.endpoint.id)) return;
+    const now = this.clock() / 1000;
+    if (!Number.isFinite(sample.time) || now - sample.time > 0.075 || sample.time > now + 0.005
+        || !Array.isArray(sample.axes) || sample.axes.length !== 6 || !sample.axes.every(value => Number.isInteger(value) && value >= -32768 && value <= 32767)) { this.dropped++; return; }
+    const bucket = Math.floor(sample.time * 100);
+    if (sample.time < this.lastLgSample || bucket <= this.lastLgBucket) return;
+    this.lastLgSample = sample.time;
+    const latest = this.lgSamples.at(-1);
+    const pending = { ...sample, axes: [...sample.axes], started: sample.time, bucket };
+    if (latest?.bucket === bucket) this.lgSamples[this.lgSamples.length - 1] = pending;
+    else this.lgSamples.push(pending);
+    while (this.lgSamples.length > 8 || this.lgSamples[0]?.time < now - 0.075) {
+      this.lgSamples.shift(); this.dropped++;
+    }
+    this.scheduleFlush();
+  }
+
   scheduleFlush() {
-    if (this.closed || this.quiescing || !this.pendingMovement || this.pace) return;
+    if (this.closed || this.quiescing || (!this.pendingMovement && !this.lgSamples.length) || this.pace) return;
     const wait = Math.max(0, this.nextMovement - this.clock());
     this.pace = setTimeout(() => {
       this.pace = null;
@@ -304,16 +326,26 @@ export class HidOutput {
 
   flush() {
     clearTimeout(this.pace); this.pace = null;
-    const delta = this.pendingMovement; this.pendingMovement = null;
-    if (!delta || delta.generation !== this.generation || !this.endpoint || !this.ready(this.endpoint.id)) return;
-    if (this.clock() > (delta.started + 0.075) * 1000) { this.dropped++; return; }
-    const dx = Math.max(-32767, Math.min(32767, Math.trunc(delta.dx)));
-    const dy = Math.max(-32767, Math.min(32767, Math.trunc(delta.dy)));
-    if (!dx && !dy) return;
-    if (!this.writeLine(`MOVE 0 ${dx} ${dy}\n`, false)) { this.dropped++; return; }
-    this.sentMovement++; this.lastMovement = this.clock();
-    this.nextMovement = this.lastMovement - this.nextMovement < this.movementIntervalMs
-      ? this.nextMovement + this.movementIntervalMs : this.lastMovement + this.movementIntervalMs;
+    const delta = this.lgSamples.shift() ?? this.pendingMovement; this.pendingMovement = null;
+    try {
+      if (!delta || delta.generation !== this.generation || !this.endpoint || !this.ready(this.endpoint.id)) return;
+      if (this.clock() > (delta.started + 0.075) * 1000) { this.dropped++; return; }
+      let line;
+      if (delta.axes) {
+        this.lastLgBucket = delta.bucket;
+        line = `IMU 0 ${delta.axes.join(' ')}\n`;
+      } else {
+        const dx = Math.max(-32767, Math.min(32767, Math.trunc(delta.dx)));
+        const dy = Math.max(-32767, Math.min(32767, Math.trunc(delta.dy)));
+        if (!dx && !dy) return;
+        line = `MOVE 0 ${dx} ${dy}\n`;
+      }
+      if (!this.writeLine(line, false)) { this.dropped++; return; }
+      this.sentMovement++; this.lastMovement = this.clock();
+      const interval = delta.axes ? 10 : this.movementIntervalMs;
+      this.nextMovement = this.lastMovement - this.nextMovement < interval
+        ? this.nextMovement + interval : this.lastMovement + interval;
+    } finally { this.scheduleFlush(); }
   }
 
   async button(button, down, generation) {
@@ -338,11 +370,27 @@ export class HidOutput {
     await this.request('SCROLL', [Number(match[1])], { fatal: true });
   }
 
-  pair() {
+  pair(profile = 'computer') {
+    if (!['computer', 'lg-tv'].includes(profile)) return Promise.reject(new Error('Unknown Bluetooth profile'));
     if (this.deviceManagement && this.targets.length >= this.hostLimit) return Promise.reject(new Error('Bluetooth device limit reached'));
-    return this.request('PAIR', [], { timeoutMs: this.metadataRequestTimeoutMs });
+    return this.request(profile === 'lg-tv' ? 'PAIR_LG' : 'PAIR', [], { timeoutMs: this.metadataRequestTimeoutMs });
+  }
+  async waitForPairing({ signal, timeoutMs = 5000 }) {
+    const deadline = performance.now() + timeoutMs;
+    while (true) {
+      signal.throwIfAborted();
+      if (!this.connected) throw new Error('Bluetooth service disconnected during pairing');
+      if (this.daemon.error) throw new Error(this.daemon.error);
+      if (this.daemon.working && this.daemon.pairing && !this.daemon.connected) return;
+      if (performance.now() >= deadline) throw new Error('Bluetooth pairing did not become ready');
+      await delay(25, undefined, { signal });
+    }
   }
   media(id, key) {
+    if (targetProfile(this.targets.find(target => target.id === id)) === 'lg-tv') {
+      if (!Object.hasOwn(lgMediaKeys, key)) return Promise.reject(new Error('This media key is not supported by the LG Bluetooth profile'));
+      return this.keyboardUsage(id, lgMediaKeys[key], 'LGKEY');
+    }
     const usages = { play_pause: 0xcd, previous: 0xb6, next: 0xb5, stop: 0xb7, mute: 0xe2, volume_up: 0xe9, volume_down: 0xea };
     if (!Object.hasOwn(usages, key)) return Promise.reject(new Error('Unknown media key'));
     if (!this.ready(id) || this.quiescing) return Promise.reject(new Error('Bluetooth host is unavailable'));
@@ -358,12 +406,21 @@ export class HidOutput {
     if (!this.deviceManagement) return Promise.reject(new Error('Bluetooth device management is unavailable'));
     return this.request('DISCONNECT', [], { timeoutMs: this.metadataRequestTimeoutMs });
   }
+  // Restart the daemon's fast advertising window so a nearby host picks the remote up sooner.
+  reconnect() {
+    if (!this.deviceManagement) return Promise.reject(new Error('Bluetooth device management is unavailable'));
+    if (!this.selectedTarget) return Promise.reject(new Error('No computer is selected'));
+    return this.request('RECONNECT', [], { timeoutMs: this.metadataRequestTimeoutMs });
+  }
   key(id, key) {
-    const usages = { up: 0x52, down: 0x51, left: 0x50, right: 0x4f };
+    const usages = targetProfile(this.targets.find(target => target.id === id)) === 'lg-tv' ? lgKeys : arrowKeys;
     if (!Object.hasOwn(usages, key)) return Promise.reject(new Error('Unknown arrow key'));
+    return this.keyboardUsage(id, usages[key], usages === lgKeys ? 'LGKEY' : 'KEY');
+  }
+  keyboardUsage(id, usage, command = 'KEY') {
     if (!this.ready(id) || this.quiescing) return Promise.reject(new Error('Bluetooth host is unavailable'));
     this.sessionMayBeActive = true;
-    return this.request('KEY', [usages[key]]);
+    return this.request(command, [usage]);
   }
 
   async rename(id, name) {
@@ -398,18 +455,19 @@ export class HidOutput {
 
   invalidate(generation) {
     this.generation = generation; this.endpoint = null; this.sessionTarget = null; this.desiredButtons = 0; this.pendingMovement = null;
+    this.lgSamples = []; this.lastLgSample = this.lastLgBucket = -Infinity;
     clearTimeout(this.pace); this.pace = null;
   }
 
   async quiesce() {
-    this.pendingMovement = null; clearTimeout(this.pace); this.pace = null; this.desiredButtons = 0; this.endpoint = null; this.sessionTarget = null;
+    this.pendingMovement = null; this.lgSamples = []; this.lastLgSample = this.lastLgBucket = -Infinity; clearTimeout(this.pace); this.pace = null; this.desiredButtons = 0; this.endpoint = null; this.sessionTarget = null;
     if (!this.sessionMayBeActive) return;
     if (!this.quiescing) {
       this.quiescing = (async () => {
         if (!this.connected) { this.sessionMayBeActive = false; return; }
         const stopID = this.nextID;
         for (const [id, pending] of this.pendingRequests) {
-          if (id >= stopID || !['OPEN', 'BUTTON', 'SCROLL', 'MEDIA', 'KEY'].includes(pending.command)) continue;
+          if (id >= stopID || !['OPEN', 'BUTTON', 'SCROLL', 'MEDIA', 'KEY', 'LGKEY'].includes(pending.command)) continue;
           clearTimeout(pending.timer); this.pendingRequests.delete(id);
           while (this.ignoredResponses.size >= 32) this.ignoredResponses.delete(this.ignoredResponses.values().next().value);
           this.ignoredResponses.add(id);

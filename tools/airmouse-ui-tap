@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Tap one inspected coordinate on the Remote 3 touchscreen for UI checks."""
+import argparse
+import json
+from pathlib import Path
+import runpy
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--remote', required=True)
+parser.add_argument('x', type=int)
+parser.add_argument('y', type=int)
+args = parser.parse_args()
+if not (0 <= args.x < 480 and 0 <= args.y < 800):
+    parser.error('Expected coordinates within the 480 x 800 screen')
+TV = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))['TV']
+script = r'''
+import fs from 'node:fs';
+import {setTimeout as delay} from 'node:timers/promises';
+if (fs.readFileSync('/sys/class/input/event1/device/name', 'utf8').trim() !== 'Hynitron cst128 Touchscreen')
+  throw new Error('Unexpected touchscreen device');
+const [x,y] = COORDINATES;
+const fd = fs.openSync('/dev/input/event1', 'w');
+function event(type, code, value) {
+  const data = Buffer.alloc(24);
+  data.writeUInt16LE(type,16); data.writeUInt16LE(code,18); data.writeInt32LE(value,20);
+  fs.writeSync(fd,data);
+}
+try {
+  event(3,47,0); event(3,57,1); event(3,53,x); event(3,54,y);
+  event(3,0,x); event(3,1,y); event(3,48,20); event(1,330,1); event(0,0,0);
+  await delay(80);
+} finally {
+  event(3,57,-1); event(3,48,0); event(1,330,0); event(0,0,0); fs.closeSync(fd);
+}
+'''.replace('COORDINATES', json.dumps([args.x, args.y]))
+TV(args.remote).ssh('node --input-type=module -', data=script.encode())

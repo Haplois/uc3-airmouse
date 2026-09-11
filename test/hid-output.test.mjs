@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HidOutput } from '../runtime/hid-output.mjs';
 import { Controller } from '../runtime/controller.mjs';
 import { fakeSensor } from './helpers.mjs';
+import { LgWakeDetector } from './support/lg-receiver.mjs';
 
 const readyState = {
   ready: true, paired: true, pairing: false, active: false, buttons: 0,
@@ -34,14 +35,14 @@ async function fakeDaemon(t, { initialState = readyState, version = 1 } = {}) {
   const server = net.createServer(socket => {
     connections++;
     clients.add(socket); socket.setEncoding('utf8'); let buffer = '';
-    socket.write(`${JSON.stringify({ state: initialState, version })}\n`);
+    if (initialState) socket.write(`${JSON.stringify({ state: initialState, version })}\n`);
     socket.on('data', chunk => {
       buffer += chunk;
       while (buffer.includes('\n')) {
         const end = buffer.indexOf('\n'), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         commands.push(line);
         const [command, rawID] = line.split(' '), id = Number(rawID);
-        if (command === 'PING' || command === 'MOVE') continue;
+        if (command === 'PING' || command === 'MOVE' || command === 'IMU') continue;
         const result = handler(command, line, socket);
         if (result === false) continue;
         const response = typeof result === 'object' ? { id, ...result } : { id, ok: true };
@@ -77,6 +78,21 @@ async function connectedOutput(t, daemon, options = {}) {
   return output;
 }
 
+test('daemon socket connection waits for inventory before publishing Bluetooth availability', async t => {
+  const daemon = await fakeDaemon(t, { initialState: null, version: 2 });
+  const published = [];
+  const output = new HidOutput({ socketPath: daemon.socketPath, onState: () => published.push({ connected: output.connected, targets: output.targets }) });
+  t.after(() => output.close());
+  output.start();
+  await waitFor(() => daemon.commands.includes('PING 0'));
+  assert.equal(output.connected, false);
+  assert.equal(published.some(state => state.connected), false);
+  daemon.state(readyV2State);
+  await waitFor(() => output.connected);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].targets[0].name, 'Work laptop');
+});
+
 test('media uses selected host while paused and stop revokes media delivery', async t => {
   const daemon=await fakeDaemon(t), output=await connectedOutput(t,daemon);
   await output.media('airmouse.host','play_pause');
@@ -95,6 +111,21 @@ test('arrow keys encode keyboard usages and reject unavailable hosts', async t =
   await assert.rejects(output.key('airmouse.host','enter'),/Unknown/);
   await output.quiesce();
   assert.ok(daemon.commands.some(line=>line.startsWith('STOP ')));
+});
+
+test('renamed LG TV uses native MR23 navigation and volume while paused', async t => {
+  const tv = { ...devices[0], name: 'TV', custom_name: 'TV', bluetooth_name: '[LG] webOS TV OLED77G3PSA' };
+  const daemon = await fakeDaemon(t, { version: 2, initialState: { ...readyV2State, devices: [tv, devices[1]] } });
+  const output = new HidOutput({ socketPath: daemon.socketPath });
+  t.after(() => output.close()); output.start();
+  await waitFor(() => output.ready(tv.id));
+  for (const key of ['power', 'input_next', 'input_previous', 'quick_settings', 'all_settings', 'input_picker', 'hdmi1', 'netflix', 'youtube', 'steam_machine', 'ok', 'back', 'home', 'channel_up', 'channel_down']) await output.key(tv.id, key);
+  for (const key of ['mute', 'volume_up', 'volume_down', 'stop', 'play_pause']) await output.media(tv.id, key);
+  assert.deepEqual(daemon.commands.filter(line => line.startsWith('LGKEY ')).map(line => Number(line.split(' ')[2])),
+    [0x8008, 0x7f01, 0x7f02, 0x7f03, 0x7f04, 0x7f05, 0x7f06, 0x7f07, 0x7f08, 0x7f09, 0x8044, 0x8028, 0x807c, 0x8000, 0x8001, 0x7f0d, 0x7f0b, 0x7f0c, 0x7f0e, 0x7f0a]);
+  assert.equal(daemon.commands.some(line => line.startsWith('MEDIA ')), false);
+  await assert.rejects(output.key(devices[1].id, 'home'), /Unknown|unavailable/);
+  await assert.rejects(output.media(tv.id, 'previous'), /not supported/);
 });
 
 test('STOP cancels pending keyboard requests and ignores their late replies', async t => {
@@ -230,6 +261,11 @@ test('v2 status derives the ordered roster and management commands use exact bou
     'CANCEL_PAIR 6',
     'PAIR 7',
   ]);
+  await output.reconnect();
+  assert.equal(daemon.commands.filter(line => !line.startsWith('PING ')).at(-1), 'RECONNECT 8');
+  daemon.state({ selected: '', connected_device: '', ready: false, active: false });
+  await waitFor(() => output.selectedTarget === '', 'cleared selection');
+  await assert.rejects(output.reconnect(), /No computer is selected/);
 });
 
 test('v2 management rejects invalid IDs, names, permutations, and capacity before writing', async t => {
@@ -438,4 +474,152 @@ test('home quick switching releases a held button and reopens only the new simul
     'TEST_KEY 82','TEST_KEY 0','TEST_KEY 81','TEST_KEY 0','TEST_KEY 80','TEST_KEY 0','TEST_KEY 79','TEST_KEY 0','TEST_KEY 82','TEST_KEY 0',
   ]);
   await controller.stop();
+});
+
+test('LG motion retains the latest sample, caps pacing, and stops obsolete generations', async t => {
+  const tv = { ...devices[0], bluetooth_name: '[LG] webOS TV OLED77G3PSA' };
+  const daemon = await fakeDaemon(t, { version: 2, initialState: { ...readyV2State, devices: [tv, devices[1]] } });
+  let now = 1000;
+  const output = new HidOutput({ socketPath: daemon.socketPath, clock: () => now, movementRateHz: 1000 });
+  t.after(() => output.close()); output.start(); await waitFor(() => output.ready(tv.id));
+  await output.open(tv.id, 1);
+  output.move({ generation: 1, time: 1, dx: 20, dy: 10 });
+  assert.equal(output.pendingMovement, null);
+  output.imu({ generation: 1, time: 1, axes: [1, 2, 3, 4, 5, 6] });
+  output.imu({ generation: 1, time: 1, axes: [7, 8, 9, 10, 11, 12] }); output.flush();
+  assert.equal(output.nextMovement, 1010);
+  await waitFor(() => daemon.commands.includes('IMU 0 7 8 9 10 11 12'));
+  assert.equal(daemon.commands.some(line => line.startsWith('MOVE ')), false);
+  output.imu({ generation: 0, time: 1, axes: [1, 2, 3, 4, 5, 6] });
+  output.imu({ generation: 1, time: 0.5, axes: [1, 2, 3, 4, 5, 6] });
+  assert.equal(output.pendingMovement, null);
+  output.imu({ generation: 1, time: 1, axes: [1, 2, 3, 4, 5, 6] });
+  output.invalidate(2); await output.quiesce(); assert.equal(output.pendingMovement, null);
+  await output.pair('lg-tv'); assert.ok(daemon.commands.some(line => line.startsWith('PAIR_LG ')));
+});
+
+test('LG profile sends MR23 reports through the real daemon IPC', { skip: !simulator || !fs.existsSync(simulator), timeout: 5000 }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'airmouse-lg-integration-')), socketPath = path.join(dir, 'control.sock');
+  const daemon = spawn(simulator, ['--simulate-lg', '--socket', socketPath, '--state-dir', dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '', output;
+  daemon.stdout.on('data', chunk => { log += chunk; }); daemon.stderr.on('data', chunk => { log += chunk; });
+  t.after(async () => {
+    output?.close();
+    if (daemon.exitCode === null && daemon.signalCode === null) {
+      daemon.kill('SIGTERM'); await Promise.race([once(daemon, 'exit'), delay(2000)]);
+      if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGKILL');
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitFor(() => fs.existsSync(socketPath) || daemon.exitCode !== null);
+  assert.equal(daemon.exitCode, null, log);
+  output = new HidOutput({ socketPath, heartbeatMs: 50 }); output.start();
+  await waitFor(() => output.ready('00000001'));
+  await output.open('00000001', 1);
+  output.imu({ generation: 1, time: Number(process.hrtime.bigint()) / 1e9, axes: [66, -182, -236, -91, 468, -4201] }); output.flush();
+  await output.button(1, true, 1); await output.button(1, false, 1);
+  await output.key('00000001', 'back');
+  output.invalidate(2); await output.quiesce();
+  await waitFor(() => log.split('\n').filter(line => line.startsWith('TEST_LG ')).length >= 8);
+  const packets = log.split('\n').filter(line => line.startsWith('TEST_LG ')).map(line => Buffer.from(line.slice(8).replaceAll(' ', ''), 'hex'));
+  assert.equal(packets[0].subarray(4, 16).toString('hex'), '000000000000ffa501d4ef97');
+  assert.equal(packets[0].readUInt16BE(16), 0x803e);
+  assert.equal(packets[0][1], 0);
+  assert.equal(packets[0][2] & 3, 2);
+  assert.equal(packets[1].subarray(4, 16).toString('hex'), '0042ff4aff14ffa501d4ef97');
+  assert.equal(packets[1][1], 1);
+  assert.equal(packets[1][2] & 3, 1);
+  assert.equal(packets[2].readUInt16BE(16), 0x8044);
+  assert.equal(packets[3].readUInt16BE(16), 0);
+  assert.equal(packets[4].readUInt16BE(16), 0x8028);
+  assert.equal(packets[5].readUInt16BE(16), 0);
+  assert.equal(packets.at(-2).readUInt16BE(16), 0x803f);
+  assert.equal(packets.at(-2)[1], packets[1][1]);
+  assert.equal(packets.at(-1)[2] & 3, 2);
+  assert.equal(packets.at(-1).readUInt16BE(16), 0);
+  await output.open('00000001', 3);
+  output.imu({ generation: 3, time: Number(process.hrtime.bigint()) / 1e9, axes: [66, -182, -236, -91, 468, -4201] }); output.flush();
+  await waitFor(() => log.split('\n').filter(line => line.startsWith('TEST_LG ')).length >= packets.length + 2);
+  const resumed = log.split('\n').filter(line => line.startsWith('TEST_LG ')).slice(packets.length).map(line => Buffer.from(line.slice(8).replaceAll(' ', ''), 'hex'));
+  assert.equal(resumed[0].readUInt16BE(16), 0x803e);
+  assert.equal(resumed[1].readUInt16BE(16), 0);
+  assert.deepEqual(resumed.slice(0, 2).map(packet => [packet[1], packet[2] & 3]), [[0, 2], [1, 1]]);
+});
+
+test('LG preserves 100 Hz motion from batched sensor delivery', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 1000;
+  const tv = { ...devices[0], bluetooth_name: '[LG] webOS TV OLED77G3PSA' };
+  const output = new HidOutput({ clock: () => now, movementRateHz: 1000 });
+  output.connected = true;
+  output.acceptState({ ...readyV2State, devices: [tv, devices[1]] }, 2);
+  output.endpoint = tv; output.generation = 1;
+  const sent = [];
+  const wake = new LgWakeDetector();
+  let woke = false;
+  output.socket = { writable: true, writableLength: 0, write(line) {
+    sent.push({ at: now, line });
+    const axes = line.trim().split(' ').slice(2).map(Number);
+    if (wake.step(axes.slice(0, 3), now) === 1) woke = true;
+  } };
+  for (let elapsed = 0; elapsed < 10000; elapsed++) {
+    now = 1000 + elapsed;
+    if (elapsed % 20 === 0) {
+      for (let index = 0; index < 16; index++) {
+        output.imu({ generation: 1, time: (now - 18.75 + index * 1.25) / 1000,
+          axes: [0, 0, elapsed < 120 || (elapsed >= 240 && elapsed < 360) ? 1800 : elapsed < 240 ? -1800 : 0, elapsed + index, 0, -4096] });
+      }
+    }
+    t.mock.timers.tick(1);
+  }
+  assert.equal(woke, true, 'A three-stroke yaw gesture must satisfy the TV wake detector');
+  assert.ok(sent.length >= 980 && sent.length <= 1001, `Only ${sent.length} LG reports in 10 seconds`);
+  for (let i = 1; i < sent.length; i++) {
+    assert.ok(sent[i].at - sent[i-1].at >= 9);
+    assert.notEqual(sent[i].line, sent[i-1].line, 'Do not manufacture repeated sensor samples');
+  }
+  output.invalidate(2);
+  const count = sent.length;
+  now += 100; t.mock.timers.tick(100);
+  assert.equal(sent.length, count, 'Pause discards buffered motion');
+});
+
+
+test('LG receiver wake contract distinguishes a preserved gesture from a 50 Hz stream', () => {
+  for (const [rate, expected] of [[50, false], [100, true]]) {
+    const detector = new LgWakeDetector();
+    let woke = false;
+    for (let i = 0; i < rate; i++) {
+      const time = i * 1000 / rate;
+      const z = time < 120 || (time >= 240 && time < 360) ? 1800 : time < 240 ? -1800 : 0;
+      if (detector.step([0, 0, z], time) === 1) woke = true;
+    }
+    assert.equal(woke, expected);
+  }
+});
+
+test('LG buffered samples expire during an output stall and ignore the computer rate', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 1000;
+  const tv = { ...devices[0], bluetooth_name: '[LG] webOS TV OLED77G3PSA' };
+  const output = new HidOutput({ clock: () => now, movementRateHz: 80 });
+  output.connected = true;
+  output.acceptState({ ...readyV2State, devices: [tv, devices[1]] }, 2);
+  output.endpoint = tv; output.generation = 1;
+  const sent = [];
+  output.socket = { writable: true, writableLength: 0, write(line) { sent.push(line); } };
+  for (let time = 0.94; time <= 1; time += 0.01) {
+    output.imu({ generation: 1, time, axes: [500, 0, 0, 0, 0, -4096] });
+  }
+  now = 1100; t.mock.timers.tick(100);
+  assert.equal(sent.length, 0);
+  assert.equal(output.lgSamples.length, 0);
+  assert.ok(output.dropped > 0);
+  output.imu({ generation: 1, time: 1.1, axes: [500, 0, 0, 0, 0, -4096] });
+  t.mock.timers.tick(1);
+  assert.equal(sent.length, 1);
+  assert.equal(output.nextMovement, 1110);
+  output.setMovementRate(80);
+  assert.equal(output.nextMovement, 1110);
+  output.invalidate(2);
 });

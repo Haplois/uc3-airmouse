@@ -15,12 +15,12 @@ TestCase {
         property bool busy: false
         property var commands: []
         property int closes: 0
-        signal changed()
-        onConnectedChanged: changed()
+        property int reconnects: 0
         signal failed(string message)
         signal commandSucceeded(string type)
         function command(value) { commands.push(value); }
         function open() {}
+        function reconnect() { reconnects++; }
         function close() { closes++; }
     }
     QtObject {
@@ -48,6 +48,15 @@ TestCase {
     property var airMouseBridge: bridge
     property var mockSlider: slider
     property var mockPower: power
+    function test_wake_reconnects_immediately_only_while_open() {
+        host.open();
+        var before = bridge.reconnects;
+        host.resumeFromSleep();
+        compare(bridge.reconnects,before+1);
+        host.close();
+        host.resumeFromSleep();
+        compare(bridge.reconnects,before+1);
+    }
     function initTestCase() {
         var request = new XMLHttpRequest();
         request.open("GET", Qt.resolvedUrl("../qml/AirMouseHost.qml"), false);
@@ -58,7 +67,7 @@ TestCase {
         source = source.replace('import "qrc:/components" as Components', 'import "' + Qt.resolvedUrl("../qml") + '"');
         source = source.replace("Components.ButtonNavigation {", 'Item { objectName: "navigation"; property var defaultConfig; function takeControl() {} function releaseControl() {}');
         source = source.replace(/Battery.level/g, "82").replace(/TouchSliderProcessor/g, "mockSlider");
-        source = source.replace("target: Power", "target: mockPower").replace(/PowerModes.Normal/g, "0").replace(/PowerModes.Idle/g, "1");
+        source = source.replace("target: Power", "target: mockPower").replace(/PowerModes.Normal/g, "0").replace(/PowerModes.Idle/g, "1").replace(/PowerModes.Low_power/g, "2");
         host = Qt.createQmlObject(source, test, "testable-AirMouseHost.qml");
         navigation = findChild(host,"navigation");
         verify(navigation);
@@ -117,6 +126,28 @@ TestCase {
         compare(bridge.commands[3],{type:"target",target:"a",keep_pointer:true});
         navigation.defaultConfig.HOME.pressed_repeat(); compare(bridge.commands.length,4);
     }
+    function test_lg_physical_remote_buttons() {
+        bridge.busy=false;
+        bridge.snapshot=({theme:"black",target_profile:"lg-tv",pointer:false,button_edges:true,ready:true,core_connected:true,targets:[]});
+        var config=navigation.defaultConfig;
+        config.HOME.pressed(); config.BACK.pressed();
+        config.DPAD_MIDDLE.pressed(); config.DPAD_MIDDLE.released();
+        config.NEXT.pressed(); config.PREV.pressed();
+        compare(bridge.commands,[{type:"key",key:"home"},{type:"key",key:"back"},{type:"key",key:"ok"},{type:"key",key:"input_next"},{type:"key",key:"input_previous"}]);
+        compare(bridge.closes,0); compare(host.opened,true);
+        config.POWER.pressed(); compare(bridge.commands[5],{type:"power"});
+        config.POWER.pressed_repeat(); compare(bridge.commands.length,6);
+        findChild(host,"airMousePage").back(); compare(bridge.closes,1);
+    }
+    function test_lg_channel_rocker_opens_picker_and_hdmi1_without_repeats() {
+        bridge.busy=false;
+        bridge.snapshot=({theme:"black",target_profile:"lg-tv",pointer:false,ready:true,targets:[]});
+        navigation.defaultConfig.CHANNEL_UP.pressed();
+        navigation.defaultConfig.CHANNEL_UP.pressed_repeat();
+        navigation.defaultConfig.CHANNEL_DOWN.pressed();
+        navigation.defaultConfig.CHANNEL_DOWN.pressed_repeat();
+        compare(bridge.commands,[{type:"key",key:"input_picker"},{type:"key",key:"hdmi1"}]);
+    }
     function test_navigation_loss_releases_before_off() {
         navigation.defaultConfig.DPAD_MIDDLE.pressed();
         inputController.activeItem=null;
@@ -142,6 +173,18 @@ TestCase {
             compare(bridge.closes,0); compare(host.opened,true);
             power.powerModeChanged(modes[i],0);
         }
+    }
+    function test_owned_bluetooth_keeps_pointing_and_rest_intent_with_screen_off() {
+        bridge.snapshot=({theme:"black",pointer:true,pointer_enabled:true,bluetooth_backend:"owned",ready:true,targets:[]});
+        power.powerModeChanged(0,1);
+        power.powerModeChanged(1,2);
+        compare(host.pointerSuspended,false); compare(bridge.commands.length,0);
+        compare(host.opened,true);
+        bridge.snapshot=({theme:"black",pointer:false,pointer_enabled:true,resting:true,bluetooth_backend:"owned",ready:true,targets:[]});
+        power.powerModeChanged(2,3);
+        compare(host.pointerSuspended,true);
+        compare(bridge.commands[0],{type:"off",reason:"Paused for standby"});
+        compare(host.opened,true);
     }
     function test_multi_step_sleep_keeps_app_open_after_standby_pause() {
         navigation.defaultConfig.DPAD_MIDDLE.pressed(); bridge.commands=[];
@@ -180,6 +223,21 @@ TestCase {
         var actions=["play_pause","previous","next","mute","volume_up","volume_down","stop"];
         for(var i=0;i<keys.length;i++) navigation.defaultConfig[keys[i]].pressed();
         for(i=0;i<keys.length;i++) compare(bridge.commands[i],{type:"media",key:actions[i]});
+    }
+    function test_lg_circle_and_menu_open_distinct_settings_without_repeats() {
+        bridge.busy=false;
+        bridge.snapshot=({theme:"black",pointer:false,ready:true,target_profile:"lg-tv",targets:[]});
+        bridge.commands=[];
+        navigation.defaultConfig.RECORD.pressed();
+        navigation.defaultConfig.RECORD.pressed_repeat();
+        navigation.defaultConfig.MENU.pressed();
+        navigation.defaultConfig.MENU.pressed_repeat();
+        compare(bridge.commands,[{type:"key",key:"quick_settings"},{type:"key",key:"all_settings"}]);
+        bridge.snapshot=({theme:"black",pointer:false,ready:true,target_profile:"computer",targets:[]});
+        bridge.commands=[];
+        navigation.defaultConfig.RECORD.pressed();
+        navigation.defaultConfig.MENU.pressed();
+        compare(bridge.commands,[]);
     }
     function test_sleep_focus_loss_does_not_stop_pointing() {
         inputController.activeItem=null;

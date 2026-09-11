@@ -7,6 +7,8 @@ import subprocess
 import tarfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
+adapter = subprocess.run(['python3', str(root / 'tools/airmouse-sensor-io-build')], check=True, capture_output=True, text=True)
+adapter = pathlib.Path(adapter.stdout.strip().splitlines()[-1])
 subprocess.run(['npm', 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], cwd=root, check=True)
 files = sorted(p for directory in ['runtime', 'deploy', 'config', 'node_modules/ws'] for p in (root / directory).rglob('*') if p.is_file())
 files += [root / 'package.json', root / 'package-lock.json']
@@ -14,12 +16,18 @@ digest = hashlib.sha256()
 for p in files:
     digest.update(str(p.relative_to(root)).encode())
     digest.update(p.read_bytes())
+digest.update(adapter.read_bytes())
 release = digest.hexdigest()[:16]
 (root / 'dist').mkdir(exist_ok=True)
 archive = root / 'dist' / f'airmouse-{release}.tar.gz'
 with archive.open('wb') as destination:
     with gzip.GzipFile(filename='', mode='wb', fileobj=destination, mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode='w') as tar:
+            info = tarfile.TarInfo('runtime/native/sensor_io.node')
+            info.size = adapter.stat().st_size
+            info.mode = 0o644
+            with adapter.open('rb') as f:
+                tar.addfile(info, f)
             for p in files:
                 info = tar.gettarinfo(str(p), arcname=str(p.relative_to(root)))
                 info.uid = info.gid = 0

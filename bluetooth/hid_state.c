@@ -49,6 +49,23 @@ bool hid_scroll(hid_state *state, uint32_t id, int32_t wheel, uint32_t now) {
     *report = (hid_report){ .id=id, .time=now, .buttons=state->buttons, .wheel=wheel };
     return true;
 }
+bool hid_imu(hid_state *state, const int16_t axes[6], uint32_t now) {
+    if (!state->active) return false;
+    hid_report *report = state->count ? &state->queue[(state->head + state->count - 1) % HID_QUEUE_SIZE] : NULL;
+    if (!report || !report->motion || report->buttons != state->buttons) {
+        report = append(state);
+        if (!report) { state->dropped++; return false; }
+    } else if ((uint32_t)(now - report->time) > 50) state->dropped++;
+    *report = (hid_report){ .time=now, .buttons=state->buttons, .motion=true };
+    memcpy(report->axes, axes, sizeof(report->axes));
+    return true;
+}
+bool hid_remote_key(hid_state *state, uint32_t id, uint16_t key, uint32_t now) {
+    if (state->count > HID_QUEUE_SIZE - 2) return false;
+    *append(state) = (hid_report){ .time=now, .keyboard=true, .usage=key, .buttons=state->buttons };
+    *append(state) = (hid_report){ .id=id, .time=now, .keyboard=true, .buttons=state->buttons };
+    return true;
+}
 void hid_stop(hid_state *state, uint32_t id, uint32_t now) {
     state->head = state->count = 0; state->buttons = 0; state->active = false;
     *append(state) = (hid_report){ .id=id, .time=now };
@@ -62,8 +79,17 @@ bool hid_media(hid_state *state, uint32_t id, uint16_t usage, uint32_t now) {
 void hid_pop(hid_state *state) {
     if (state->count) { state->head = (state->head + 1) % HID_QUEUE_SIZE; state->count--; }
 }
+bool hid_key_supported(uint8_t usage) {
+    switch (usage) {
+        case 0x28: case 0x29: case 0x48: case 0x4b: case 0x4e:
+        case 0x4f: case 0x50: case 0x51: case 0x52:
+        case 0x78: case 0x7f: case 0x80: case 0x81: case 0xe3:
+            return true;
+        default: return false;
+    }
+}
 bool hid_key(hid_state *state, uint32_t id, uint8_t usage, uint32_t now) {
-    if (usage < 0x4f || usage > 0x52 || state->count > HID_QUEUE_SIZE - 2) return false;
+    if (!hid_key_supported(usage) || state->count > HID_QUEUE_SIZE - 2) return false;
     *append(state) = (hid_report){ .time=now, .keyboard=true, .usage=usage };
     *append(state) = (hid_report){ .id=id, .time=now, .keyboard=true };
     return true;

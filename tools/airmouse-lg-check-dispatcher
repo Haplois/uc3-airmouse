@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Emulate the reviewed LG report dispatcher with synthetic reports and helper calls."""
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import struct
+
+
+def dispatch(data, slot, report=0xfd, dual=False, blocked=False):
+    from elftools.elf.elffile import ELFFile
+    from unicorn import Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_CODE
+    from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                                   UC_ARM_REG_LR, UC_ARM_REG_SP, UC_ARM_REG_PC)
+    machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    machine.mem_map(0, 0x200000)
+    machine.mem_map(0x300000, 0x20000)
+    for segment in ELFFile(io.BytesIO(data)).iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            machine.mem_write(segment['p_vaddr'], segment.data())
+    stop, payload = 0x31f000, 0x310000
+    machine.reg_write(UC_ARM_REG_R0, slot)
+    machine.reg_write(UC_ARM_REG_SP, 0x30fff0)
+    machine.reg_write(UC_ARM_REG_LR, stop | 1)
+    machine.mem_write(payload, bytes([report]) + bytes(31))
+    def word(address, value):
+        machine.mem_write(address, struct.pack('<I', value))
+    for index in range(5):
+        word(0xdf858 + 0x11c + index * 20, payload)
+        word(0xdf858 + 0x114 + index * 20, payload)
+        word(0xdf858 + 0x118 + index * 20, 20)
+        word(0xdf858 + 0xd80 + index * 4, 1)
+    word(0xd65e4, int(dual))
+    word(0xdf858 + 0xddc, int(blocked))
+    calls = []
+    def hook(_machine, address, _size, _context):
+        if address == stop:
+            machine.emu_stop()
+            return
+        if (0x65aa4 <= address < 0x65d2c or 0x5dbf0 <= address < 0x5dbfa
+                or 0xb95c0 <= address < 0xb9600):
+            return
+        r0, r1, r2 = [machine.reg_read(r) for r in
+                      (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2)]
+        if address == 0x1d370:
+            if r2 > 0x12c:
+                raise ValueError('Unexpected memset size')
+            machine.mem_write(r0, bytes([r1 & 255]) * r2)
+        elif address == 0x657c0:
+            calls.append({'motion_report': r0, 'slot': r1})
+        elif address in (0x655cc, 0x5580c):
+            calls.append({'other_handler': hex(address), 'argument': r0})
+        elif address not in (0x6e5d4, 0x6f020, 0x5f684, 0x604b4, 0x5da30):
+            raise ValueError(f'Unexpected dispatcher call: {address:#x}')
+        machine.reg_write(UC_ARM_REG_R0, 0)
+        machine.reg_write(UC_ARM_REG_PC, machine.reg_read(UC_ARM_REG_LR))
+    machine.hook_add(UC_HOOK_CODE, hook)
+    machine.emu_start(0x65aa5, stop, count=20000)
+    if machine.reg_read(UC_ARM_REG_PC) != stop:
+        raise ValueError('Dispatcher did not return')
+    return calls
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--require-secondary', action='store_true')
+    args = parser.parse_args()
+    data = args.binary.read_bytes()
+    if hashlib.sha256(data).hexdigest() not in (
+        'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b',
+        '4dcf736250abc59372ff6f9b6254fc35d326178d35f6a2a7ec1d3b02ba2d8647',
+        '1d1f4327ac01e624b01e31b9b82831033ec2a4c083695d401ed7aa83c7931cd3',
+        'e5cd3753045c2e39b9fda2ea0968b8440dddab4f7494872a0a9bb7a89025f51a',
+        '971bc4fce21529adcdf194f9226aa3bfa44ad0d4ad462ab4902112aeca360b70',
+        'e0d7097ef21fe83af854633307f82f169d5b9e653887de40bdc8004ea88420e3',
+    ):
+        parser.exit(1, 'Unreviewed receiver binary\n')
+    result = dispatch(data, 1, dual=True)
+    print(json.dumps({'secondary_calls': result}))
+    if args.require_secondary and result != [{'motion_report': 0xfd, 'slot': 1}]:
+        parser.exit(1, 'Second-slot FD reports never reach motion/key processing\n')
+
+
+if __name__ == '__main__':
+    main()

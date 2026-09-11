@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Check next/previous input through Remote 3, then restore the TV's original app."""
+import argparse
+import json
+from pathlib import Path
+import runpy
+import shlex
+import subprocess
+import time
+
+SEND = '''
+import { HidOutput } from '/mnt/data/airmouse/current/runtime/hid-output.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+const output = new HidOutput();
+output.start();
+try {
+  const deadline = performance.now() + 5000;
+  while (!output.deviceManagement && performance.now() < deadline) await delay(50);
+  if (!output.ready(output.selectedTarget)) throw new Error('Selected TV is not ready');
+  await output.key(output.selectedTarget, KEY);
+} finally { output.close(); }
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True)
+    parser.add_argument('--remote', required=True)
+    args = parser.parse_args()
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv, remote = deploy['TV'](args.tv), deploy['TV'](args.remote)
+
+    def api(service, method, body=None):
+        response = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 2000 -f luna://' + service +
+                                    '/' + method + ' ' + shlex.quote(json.dumps(body or {})), tty=True))
+        if response.get('returnValue') is not True:
+            raise ValueError('TV API failed: ' + method)
+        return response
+
+    def current():
+        return api('com.webos.service.eim', 'getCurrentInput')['mainInputSourceId']
+
+    def launch(app):
+        api('com.webos.service.applicationmanager', 'launch', {'id': app})
+
+    stopped = False
+    original_app = original_input = None
+    devices = []
+    try:
+        devices = api('com.webos.service.eim', 'getAllInputStatus')['devices']
+        connected = sorted((device for device in devices if device.get('connected')
+                            and device['id'].startswith('HDMI_')), key=lambda device: device['port'])
+        if len(connected) < 2:
+            raise ValueError('Connect two HDMI inputs for this check')
+        original_input = current()
+        original_app = api('com.webos.service.applicationmanager', 'getForegroundAppInfo')['appId']
+        remote.ssh('systemctl is-active airmouse.service')
+        stopped = True
+        remote.ssh('systemctl stop airmouse.service')
+        for key, direction in [('input_next', 1), ('input_previous', -1)]:
+            before = current()
+            index = next((i for i, device in enumerate(connected) if device['id'] == before), None)
+            expected = connected[(index + direction) % len(connected) if index is not None else 0 if direction == 1 else -1]['id']
+            remote.ssh('node --input-type=module -', data=SEND.replace('KEY', json.dumps(key)).encode())
+            deadline = time.monotonic() + 5
+            while current() != expected:
+                if time.monotonic() >= deadline:
+                    raise ValueError(key + ' did not select ' + expected)
+                time.sleep(.2)
+            print(json.dumps({'key': key, 'before': before, 'after': expected}), flush=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Input check failed: {error}\n')
+    finally:
+        try:
+            if stopped and original_input:
+                original = next((device for device in devices if device['id'] == original_input), None)
+                if original and current() != original_input:
+                    launch(original['appId'])
+            if stopped and original_app:
+                launch(original_app)
+        finally:
+            if stopped:
+                remote.ssh('systemctl start airmouse.service')
+
+
+if __name__ == '__main__':
+    main()

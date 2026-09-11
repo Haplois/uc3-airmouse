@@ -95,8 +95,26 @@ class Daemon(unittest.TestCase):
             self.assertTrue(self.command('KEY',str(usage))['ok'])
         keys=[int(line.split()[1]) for line in self.contents().splitlines() if line.startswith('TEST_KEY ')]
         self.assertEqual(keys,[82,0,81,0,80,0,79,0])
-        self.assertFalse(self.command('KEY','78')['ok'])
+        self.assertFalse(self.command('KEY','83')['ok'])
 
+    def test_lg_keys_while_paused_are_press_then_release(self):
+        self.start()
+        usages = [40, 41, 227, 75, 78, 127, 128, 129, 120, 72]
+        for usage in usages:
+            self.assertTrue(self.command('KEY', str(usage))['ok'])
+        keys = [int(line.split()[1]) for line in self.contents().splitlines() if line.startswith('TEST_KEY ')]
+        self.assertEqual(keys, [value for usage in usages for value in (usage, 0)])
+
+    def test_reconnect_is_harmless_while_connected_and_needs_a_selection(self):
+        self.start(hosts=2)
+        self.assertTrue(self.command('RECONNECT')['ok'])
+        self.assertTrue(self.command('OPEN')['ok'])
+        self.assertTrue(self.command('RECONNECT')['ok'])
+        self.assertTrue(self.state(lambda s: s['active'])['ready'])
+        self.assertTrue(self.command('STOP')['ok'])
+        self.assertTrue(self.command('DISCONNECT')['ok'])
+        self.state(lambda s: not s['selected'])
+        self.assertFalse(self.command('RECONNECT')['ok'])
     def test_disconnect_preserves_devices_and_persists(self):
         self.start(hosts=2)
         self.assertTrue(self.command('DISCONNECT')['ok'])

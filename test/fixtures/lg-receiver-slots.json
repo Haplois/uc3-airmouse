@@ -1,0 +1,150 @@
+{
+  "sha256": "c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b",
+  "policy": "stock",
+  "scope": "Reviewed slot and family functions; simulated database and helper calls",
+  "limits": "Does not test discovery, Bluetooth, key dispatch, motion, or persistence",
+  "results": [
+    {
+      "name": "LGE MR23",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR23",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR24",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR24",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR24N",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR24N",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR25GA",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR25GA",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR25GB",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR25GB",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR25JP",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR25JP",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR25LA",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR25LA",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE MR26GA",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE MR26GA",
+      "requested_slot": 1,
+      "selected_slot": 0,
+      "database_write_slots": [
+        0
+      ],
+      "primary_preserved": false
+    },
+    {
+      "name": "LGE SP16",
+      "requested_slot": 0,
+      "selected_slot": 0,
+      "database_write_slots": [],
+      "primary_preserved": true
+    },
+    {
+      "name": "LGE SP16",
+      "requested_slot": 1,
+      "selected_slot": 1,
+      "database_write_slots": [],
+      "primary_preserved": true
+    }
+  ]
+}

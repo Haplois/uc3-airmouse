@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Reboot the lab TV and verify protected dual-remote recovery."""
+import argparse
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+import time
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True, help='root@TV-host')
+    parser.add_argument('--remote', required=True, help='root@Remote-3-host')
+    args = parser.parse_args()
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv, remote = deploy['TV'](args.tv), deploy['TV'](args.remote)
+    root = '/var/lib/webosbrew/airmouse-lg-receiver'
+
+    tv.health()
+    remote.ssh('systemctl is-active airmouse.service airmouse-bluetooth.service '
+               'airmouse-repair-keep-awake.service')
+    tv.ssh('/usr/bin/python3 -c "import runpy; '
+           f'm=runpy.run_path(\'{root}/startup.py\'); assert m[\'slots_valid\']()"')
+    slots = json.loads(tv.ssh(f'cat {root}/slots.json'))
+    secondary = slots.get('secondary_address', '').lower()
+    if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', secondary):
+        raise RuntimeError('Protected secondary address is invalid')
+    try:
+        tv.ssh('systemctl reboot')
+    except subprocess.CalledProcessError:
+        pass
+
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2', args.tv, 'true']
+    went_offline = False
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        online = subprocess.run(ssh, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if not online:
+            went_offline = True
+        elif went_offline:
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError('TV did not complete an observable reboot')
+
+    deadline = time.monotonic() + 120
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            tv.health()
+            tv.ssh('systemctl is-active bthidmanager.service airmouse-lg-link.service')
+            tv.ssh('/usr/bin/python3 -c "import runpy; '
+                   f'm=runpy.run_path(\'{root}/startup.py\'); assert m[\'slots_valid\']()"')
+            break
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            last_error = error
+            time.sleep(2)
+    else:
+        raise RuntimeError(f'TV receiver did not recover: {last_error}')
+
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            state = json.loads(remote.ssh('cat /mnt/data/airmouse/state/status.json'))
+            if state.get('ready') is True and state.get('target_profile') == 'lg-tv':
+                break
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        time.sleep(1)
+    else:
+        raise RuntimeError('Remote 3 did not become ready after the TV receiver recovered')
+
+    check = Path(__file__).with_name('airmouse-lg-check-key-route')
+    command = [sys.executable, str(check), '--tv', args.tv, '--remote', args.remote, '--motion']
+    first = subprocess.run(command)
+    if first.returncode:
+        print('Initial activity exposed a missing receiver attachment; waiting for automatic refresh.',
+              flush=True)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            try:
+                attached = tv.ssh(
+                    f'cd {root} && /usr/bin/python3 -c "import link; '
+                    f'assert link.receiver_attached(\'{secondary}\')"')
+                state = json.loads(remote.ssh('cat /mnt/data/airmouse/state/status.json'))
+                if attached == '' and state.get('ready') is True:
+                    break
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+            time.sleep(1)
+        else:
+            raise RuntimeError('Automatic receiver attachment refresh did not complete')
+        subprocess.run(command, check=True)
+    remote.ssh('systemctl is-active airmouse.service airmouse-bluetooth.service '
+               'airmouse-repair-keep-awake.service')
+    print('TV reboot retained distinct remote slots, patched startup, keys, and cursor motion.')
+
+
+if __name__ == '__main__':
+    main()

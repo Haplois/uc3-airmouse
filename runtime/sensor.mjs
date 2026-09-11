@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { readText, readJSON, saveJSON, equalSetting } from './storage.mjs';
 
 const channels = ['accel_x', 'accel_y', 'accel_z', 'anglvel_x', 'anglvel_y', 'anglvel_z', 'timestamp'];
@@ -27,6 +28,30 @@ export class Sensor {
     this.fd = null;
     this.timer = null;
     this.record = null;
+  }
+
+  inputIO() {
+    return this.inputBinding ??= createRequire(import.meta.url)(process.env.AIRMOUSE_SENSOR_IO ?? './native/sensor_io.node');
+  }
+
+  static wakeDevice() {
+    const base = '/sys/class/input';
+    const found = fs.readdirSync(base).filter(name => /^event\d+$/.test(name)
+      && readText(`${base}/${name}/device/name`) === 'bmi323');
+    if (found.length !== 1) throw new Error('Expected one BMI323 wake input');
+    return `/dev/input/${found[0]}`;
+  }
+
+  watchWake(onWake, onError) {
+    this.closeReader();
+    const binding = this.inputIO();
+    this.wakeReader = binding.watch(Sensor.wakeDevice(), true, false, (error, bytes) => {
+      if (error) { this.closeReader(); onError(new Error(error)); return; }
+      for (let offset = 0; offset + 24 <= bytes.length; offset += 24) {
+        if (bytes.readUInt16LE(offset + 16) === 1 && bytes.readUInt16LE(offset + 18) === 143
+            && bytes.readInt32LE(offset + 20) === 1) { onWake(); break; }
+      }
+    });
   }
 
   static discover() {
@@ -120,29 +145,31 @@ export class Sensor {
 
   start(generation, onSamples, onError) {
     if (!this.record || this.fd !== null) throw new Error('Invalid acquisition state');
-    this.fd = fs.openSync(this.device, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-    const buffer = Buffer.alloc(this.layout.bytes * 64);
+    this.closeReader();
+    const binding = this.inputIO();
     this.lastData = performance.now();
-    this.lastCheck = 0;
     const reader = this.reader = { checking: false };
+    const fail = error => { if (this.reader === reader) { this.closeReader(); onError(error); } };
+    try {
+      this.wakeReader = binding.watch(Sensor.wakeDevice(), true, true, error => { if (error) fail(new Error(error)); });
+      this.fd = binding.watch(this.device, false, false, (error, bytes) => {
+        if (this.reader !== reader) return;
+        if (error) { fail(new Error(error)); return; }
+        try { this.lastData = performance.now(); onSamples(this.decode(bytes, generation)); }
+        catch (error) { fail(error); }
+      });
+    } catch (error) { this.closeReader(); throw error; }
     this.timer = setInterval(() => {
       try {
         const now = performance.now();
-        if (reader.checking && now - reader.checkStarted > 500) throw new Error('Sensor health check stalled');
-        if (!reader.checking && now - this.lastCheck > 250) {
-          this.lastCheck = now;
+        if (reader.checking && now - reader.checkStarted > 1000) throw new Error('Sensor health check stalled');
+        if (!reader.checking) {
           reader.checking = true; reader.checkStarted = now;
-          this.checkAcquisition(reader).catch(error => {
-            if (this.reader === reader) { this.closeReader(); onError(error); }
-          }).finally(() => { reader.checking = false; });
+          this.checkAcquisition(reader).catch(fail).finally(() => { reader.checking = false; });
         }
-        let count;
-        try { count = fs.readSync(this.fd, buffer, 0, buffer.length, null); }
-        catch (error) { if (error.code !== 'EAGAIN') throw error; count = 0; }
-        if (count) { this.lastData = now; onSamples(this.decode(buffer.subarray(0, count), generation)); }
-        if (now - this.lastData > 250) throw new Error('Sensor stalled');
-      } catch (error) { this.closeReader(); onError(error); }
-    }, 2);
+        if (now - this.lastData > 500) throw new Error('Sensor stalled');
+      } catch (error) { fail(error); }
+    }, 250);
   }
 
   async checkAcquisition(reader) {
@@ -158,24 +185,27 @@ export class Sensor {
     }
   }
 
-  closeReader() {
+  closeReader({ keepWake = false } = {}) {
     this.reader = null;
     clearInterval(this.timer); this.timer = null;
-    if (this.fd !== null) { fs.closeSync(this.fd); this.fd = null; }
+    if (this.fd !== null) { this.inputIO().close(this.fd); this.fd = null; }
+    if (this.wakeReader && !keepWake) { this.inputIO().close(this.wakeReader); this.wakeReader = null; }
   }
 
   pause() {
-    this.closeReader();
-    if (this.record) this.write('buffer/enable', '0');
+    this.closeReader({ keepWake: true });
+    try { if (this.record) this.write('buffer/enable', '0'); }
+    finally { this.closeReader(); }
   }
 
   restore() {
     try { this.restoreBaseline(); this.recoveryFailed = false; }
     catch (error) { this.recoveryFailed = true; throw error; }
+    finally { this.closeReader(); }
   }
 
   restoreBaseline() {
-    this.closeReader();
+    this.closeReader({ keepWake: true });
     if (!this.record) {
       if (!fs.existsSync(this.journalFile)) return;
       this.record = readJSON(this.journalFile);

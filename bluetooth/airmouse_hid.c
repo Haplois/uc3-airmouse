@@ -29,6 +29,7 @@
 #include "gatt_migration.h"
 #include "hid_state.h"
 #include "host_registry.h"
+#include "lg_remote.h"
 
 #define LEASE_MS 1000u
 #define RELEASE_MS 250u
@@ -43,7 +44,7 @@ static const uint8_t descriptor[] = {
     0x15,0x00,0x26,0xff,0x03,0x19,0x00,0x2a,0xff,0x03,
     0x75,0x10,0x95,0x01,0x81,0x00,0xc0,
     0x05,0x01,0x09,0x06,0xa1,0x01,0x85,0x03,
-    0x05,0x07,0x15,0x00,0x25,0x52,0x19,0x00,0x29,0x52,
+    0x05,0x07,0x15,0x00,0x26,0xe3,0x00,0x19,0x00,0x29,0xe3,
     0x75,0x08,0x95,0x01,0x81,0x00,0xc0
 };
 static uint8_t advertising[] = {
@@ -52,6 +53,21 @@ static uint8_t advertising[] = {
     3,BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,0x12,0x18,
     3,BLUETOOTH_DATA_TYPE_APPEARANCE,0xc2,0x03
 };
+static uint8_t lg_advertising[] = {
+    2,BLUETOOTH_DATA_TYPE_FLAGS,5,
+    23,BLUETOOTH_DATA_TYPE_MANUFACTURER_SPECIFIC_DATA,0xc4,0x00,
+    'S','C','D',' ','2','1','.','2',',','B','A',' ','3','5',',','w','e','b','O','S'
+};
+static uint8_t lg_scan_response[] = {
+    9,BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME,'L','G','E',' ','M','R','2','3'
+};
+static bool lg_profile, lg_pairing, simulation_lg, control_subscribed;
+static lg_remote magic;
+static hids_device_report_t lg_report_storage[LG_GATT_REPORT_COUNT];
+static struct { uint8_t bytes[30]; uint8_t length; } control_queue[8];
+static unsigned control_head, control_count;
+static int16_t last_axes[6]={0,0,0,0,0,-4096};
+static uint8_t remote_battery=63;
 static hid_state input;
 static hci_con_handle_t handle = HCI_CON_HANDLE_INVALID;
 static btstack_packet_callback_registration_t hci_events, sm_events;
@@ -77,7 +93,7 @@ static bool consumer_subscribed;
 static uint16_t sent_consumer;
 static uint32_t consumer_sent_at;
 static bool keyboard_subscribed;
-static uint8_t sent_key;
+static uint16_t sent_key;
 static uint32_t key_sent_at;
 static uint8_t protocol_mode = 1, sent_buttons;
 static uint32_t highest_id, last_seen, stop_time, pairing_until, connected_at, started_at, last_status;
@@ -113,6 +129,10 @@ static void notify_service(const char *message);
 static void query_host_name(void);
 static void advertise(void);
 static void reconnect_advertising(void);
+static void configure_profile(void);
+static bool control_ready(void) {
+    return lg_profile && control_subscribed && control_count && working && encrypted() && !shutting_down;
+}
 
 static void fatal(const char *message) { fprintf(stderr,"airmouse-hid: %s: %s\n",message,strerror(errno)); exit(1); }
 static void flush_output(void) {
@@ -176,10 +196,12 @@ static void cancel_queued(const char *reason) {
     for(unsigned i=0;i<count;i++) reply(ids[i],reason);
 }
 static void disconnect_host(void) {
+    control_subscribed=false; control_count=0;
     if (handle!=HCI_CON_HANDLE_INVALID && !simulation) gap_disconnect(handle);
     initialized=false; subscribed=false; send_requested=false;
 }
 static void stop_input(uint32_t id) {
+    if(lg_profile) lg_end_motion(&magic);
     cancel_queued("Input stopped");
     if (!stop_pending) stop_time=now_ms();
     hid_stop(&input,id,now_ms()); stop_pending=true;
@@ -209,7 +231,7 @@ static void accepted_report(const hid_report *report) {
     bool state_changed=!initialized || sent_buttons!=report->buttons;
     uint32_t id=report->id;
     if (report->consumer) { sent_consumer=report->usage; consumer_sent_at=now_ms(); }
-    else if (report->keyboard) { sent_key=(uint8_t)report->usage; key_sent_at=now_ms(); }
+    else if (report->keyboard) { sent_key=report->usage; key_sent_at=now_ms(); }
     else sent_buttons=report->buttons;
     reports_sent++;
     hid_pop(&input);
@@ -226,12 +248,51 @@ static void accepted_report(const hid_report *report) {
 }
 static void send_one(void) {
     send_requested=false;
+    if (control_ready()) {
+        int result=hids_device_send_input_report_for_id(handle,LG_CONTROL_REPORT,control_queue[control_head].bytes,control_queue[control_head].length);
+        if (result==ERROR_CODE_SUCCESS) { control_head=(control_head+1)%8; control_count--; reports_sent++; }
+        else { control_count=0; error_text="LG control response rejected"; disconnect_host(); }
+        return;
+    }
     if (!available()) return;
     const hid_report *report=hid_peek(&input,now_ms());
+    bool startup=lg_profile && magic.start_pending && input.active && report && report->motion && magic.motion_requested;
+    if(lg_profile && (magic.stop_pending || startup)) {
+        bool stopping=magic.stop_pending;
+        int16_t axes[6]; memcpy(axes,startup && !stopping?report->axes:last_axes,sizeof(axes));
+        axes[0]=axes[1]=axes[2]=0;
+        uint8_t remote_data[LG_MOTION_SIZE];
+        lg_encode(remote_data,0xc4,stopping?magic.sequence:0,remote_battery,false,axes,
+                  stopping?LG_MOTION_STOP:LG_MOTION_START,0);
+        int result;
+        if(simulation) {
+            printf("TEST_LG"); for(unsigned i=0;i<sizeof(remote_data);i++) printf(" %02x",remote_data[i]); puts(""); result=0;
+        } else result=hids_device_send_input_report_for_id(handle,LG_MOTION_REPORT,remote_data,sizeof(remote_data));
+        if(result==ERROR_CODE_SUCCESS) {
+            if(stopping) { magic.stop_pending=false; magic.motion_running=false; }
+            else { magic.start_pending=false; magic.motion_running=true; magic.sequence=0; }
+            reports_sent++;
+        } else {
+            error_text="LG motion transition rejected"; cancel_queued(error_text);
+            hid_reset(&input); stop_pending=false; disconnect_host(); send_status();
+        }
+        return;
+    }
     if (!report) return;
     uint8_t data[6]; hid_encode(report,data);
     int result;
-    if (report->consumer) {
+    if (lg_profile) {
+        bool pointing=input.active && magic.motion_requested && !magic.start_pending;
+        int16_t axes[6]; memcpy(axes,report->motion?report->axes:last_axes,sizeof(axes));
+        if (!report->motion || !input.active) axes[0]=axes[1]=axes[2]=0;
+        uint16_t key=report->keyboard && report->usage ? report->usage : report->buttons&1 ? 0x8044 : report->buttons&2 ? 0x8028 : 0;
+        uint8_t remote_data[LG_MOTION_SIZE];
+        uint8_t sequence=pointing && report->motion ? lg_motion_sequence(&magic) : magic.sequence;
+        lg_encode(remote_data,0xc4,sequence,remote_battery,pointing,axes,key,(int8_t)report->wheel);
+        if (simulation) {
+            printf("TEST_LG"); for(unsigned i=0;i<sizeof(remote_data);i++) printf(" %02x",remote_data[i]); puts(""); result=0;
+        } else result=hids_device_send_input_report_for_id(handle,LG_MOTION_REPORT,remote_data,sizeof(remote_data));
+    } else if (report->consumer) {
         uint8_t consumer_data[]={(uint8_t)report->usage,(uint8_t)(report->usage>>8)};
         if (simulation) { printf("TEST_MEDIA %u\n",report->usage); fflush(stdout); result=0; }
         else if (!consumer_subscribed || protocol_mode==0) result=ERROR_CODE_COMMAND_DISALLOWED;
@@ -256,10 +317,10 @@ static void send_one(void) {
     }
 }
 static void pump(void) {
-    if (send_requested || !available() || !hid_peek(&input,now_ms())) return;
+    if (send_requested || (!control_ready() && (!available() || (!(lg_profile && magic.stop_pending) && !hid_peek(&input,now_ms()))))) return;
     if (simulation) {
         if (simulation_interval && (uint32_t)(now_ms()-simulation_last)<simulation_interval) return;
-        do { simulation_last=now_ms(); send_one(); } while(!simulation_interval && hid_peek(&input,now_ms()));
+        do { simulation_last=now_ms(); send_one(); } while(!simulation_interval && available() && ((lg_profile && magic.stop_pending) || hid_peek(&input,now_ms())));
         return;
     }
     send_requested=true;
@@ -278,10 +339,33 @@ static void selected_changed(void) {
     const host_record *selected=hosts_by_id(&hosts,hosts.selected_id);
     trust_index=selected?selected->db_slot:-1;
 }
+static bool lg_host(const host_record *host) {
+    if (!host) return false;
+    const char *name=host->bluetooth_name[0]?host->bluetooth_name:host->custom_name;
+    return (!strncasecmp(name,"LG ",3) || !strncasecmp(name,"[LG]",4)) && (strcasestr(name,"TV") || strcasestr(name,"OLED"));
+}
+static void configure_profile(void) {
+    if (handle!=HCI_CON_HANDLE_INVALID) return;
+    lg_profile=pairing()?lg_pairing:lg_host(hosts_by_id(&hosts,hosts.selected_id));
+    magic=(lg_remote){0}; control_subscribed=false; control_head=control_count=0;
+    memset(last_axes,0,sizeof(last_axes)); last_axes[5]=-4096;
+    if (simulation) { magic.motion_requested=true; return; }
+    att_set_db(lg_profile?lg_gatt_database():profile_data);
+    if(tlv) {
+        int migrated=migrate_gatt_subscriptions(tlv,&tlv_context,lg_profile);
+        if(migrated<0) { errno=EIO; fatal("Preserving Bluetooth profile subscriptions"); }
+        if(migrated) sync_bonds();
+    }
+    if (lg_profile) hids_device_init_with_storage(0,lg_descriptor,sizeof(lg_descriptor),LG_GATT_REPORT_COUNT,lg_report_storage);
+    else hids_device_init(0,descriptor,sizeof(descriptor));
+    gap_advertisements_set_data(lg_profile?sizeof(lg_advertising):sizeof(advertising),lg_profile?lg_advertising:advertising);
+    gap_scan_response_set_data(lg_profile?sizeof(lg_scan_response):0,lg_scan_response);
+}
 static void advertise(void) {
     if(simulation || !working || probe || shutting_down || handle!=HCI_CON_HANDLE_INVALID) return;
     bd_addr_t direct={0};
     gap_advertisements_enable(0);
+    configure_profile();
     gap_whitelist_clear();
     const host_record *selected=hosts_by_id(&hosts,hosts.selected_id);
     bool filtered=selected && !pairing() && privacy_filter;
@@ -321,15 +405,25 @@ static bool name_from_hex(const char *text,char *name) {
 }
 static void simulate_reconnect(void) {
     if(!simulation) return;
+    configure_profile();
     subscribed=report_subscribed=hosts.selected_id!=0 && !pairing();
     initialized=subscribed; name_attempted=false;
 }
 static bool management(char **tokens,unsigned count,uint32_t id) {
     bool select=!strcmp(tokens[0],"SELECT"),forget=!strcmp(tokens[0],"FORGET");
     bool rename=!strcmp(tokens[0],"RENAME"),reorder=!strcmp(tokens[0],"REORDER");
-    bool begin=!strcmp(tokens[0],"PAIR"),cancel=!strcmp(tokens[0],"CANCEL_PAIR");
-    bool disconnect=!strcmp(tokens[0],"DISCONNECT");
-    if(!select && !forget && !rename && !reorder && !begin && !cancel && !disconnect) return false;
+    bool begin=!strcmp(tokens[0],"PAIR") || !strcmp(tokens[0],"PAIR_LG"),cancel=!strcmp(tokens[0],"CANCEL_PAIR");
+    bool disconnect=!strcmp(tokens[0],"DISCONNECT"),reconnect=!strcmp(tokens[0],"RECONNECT");
+    if(!select && !forget && !rename && !reorder && !begin && !cancel && !disconnect && !reconnect) return false;
+    if(reconnect) {
+        /* A peripheral cannot dial a host; it can only advertise and wait. RECONNECT restarts the fast
+         * 20 ms window for the selected host. It is harmless while connected or pairing, so it never fails. */
+        if(count!=2) { close_client(); return true; }
+        if(!working || shutting_down) reply(id,"Bluetooth is not ready");
+        else if(!hosts.selected_id) reply(id,"No computer is selected");
+        else { if(handle==HCI_CON_HANDLE_INVALID && !pairing()) reconnect_advertising(); reply(id,NULL); }
+        send_status(); return true;
+    }
     if(input.active || input.count || sent_consumer || sent_key || stop_pending || shutting_down || !working) { reply(id,"Pause pointing before managing computers"); return true; }
     if(pairing() && !cancel) { reply(id,"Finish or cancel pairing first"); return true; }
     if((begin || cancel || disconnect) && count!=2) { close_client(); return true; }
@@ -338,7 +432,7 @@ static bool management(char **tokens,unsigned count,uint32_t id) {
         switching_host=0; selected_changed(); disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL);
     } else if(begin) {
         if(!hosts.next_id || hosts.count==HOSTS_LIMIT || (!simulation && le_device_db_count()>=HOSTS_LIMIT)) reply(id,"Four computers are already paired");
-        else { pairing_until=now_ms()+60000; disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL); }
+        else { lg_pairing=!strcmp(tokens[0],"PAIR_LG"); pairing_until=now_ms()+60000; disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL); }
     } else if(cancel) {
         if(!pairing_until) { reply(id,NULL); send_status(); return true; }
         pairing_until=0; disconnect_host(); simulate_reconnect(); reconnect_advertising(); reply(id,NULL);
@@ -387,27 +481,43 @@ static bool management(char **tokens,unsigned count,uint32_t id) {
     send_status(); return true;
 }
 static void command(char *line) {
-    char *tokens[6], *save=NULL; unsigned count=0;
-    for(char *token=strtok_r(line," \r",&save); token && count<6; token=strtok_r(NULL," \r",&save)) tokens[count++]=token;
+    char *tokens[9], *save=NULL; unsigned count=0;
+    for(char *token=strtok_r(line," \r",&save); token && count<9; token=strtok_r(NULL," \r",&save)) tokens[count++]=token;
     int64_t id=0,a=0,b=0;
-    if(count<2 || count==6 || !number(tokens[1],0,UINT32_MAX,&id)) { close_client(); return; }
-    bool ping=!strcmp(tokens[0],"PING"), move=!strcmp(tokens[0],"MOVE");
-    if ((ping || move) ? id!=0 : id<=highest_id) { close_client(); return; }
-    if (!ping && !move) highest_id=(uint32_t)id;
+    if(count<2 || count==9 || !number(tokens[1],0,UINT32_MAX,&id)) { close_client(); return; }
+    bool ping=!strcmp(tokens[0],"PING"), imu=!strcmp(tokens[0],"IMU"), move=!strcmp(tokens[0],"MOVE");
+    if ((ping || move || imu) ? id!=0 : id<=highest_id) { close_client(); return; }
+    if (!ping && !move && !imu) highest_id=(uint32_t)id;
     last_seen=now_ms();
     if (ping && count==2) return;
     if(management(tokens,count,(uint32_t)id)) return;
     if (!strcmp(tokens[0],"STOP") && count==2) { stop_input((uint32_t)id); send_status(); return; }
     if (!strcmp(tokens[0],"OPEN") && count==2) {
         if (!ready() || input.active || !hid_open(&input)) reply((uint32_t)id,"Bluetooth host is not ready");
-        else { error_text=""; reply((uint32_t)id,NULL); }
+        else { if(lg_profile) lg_begin_motion(&magic); error_text=""; reply((uint32_t)id,NULL); }
+    } else if (imu && count==8) {
+        int16_t axes[6];
+        for(unsigned i=0;i<6;i++) { if(!number(tokens[i+2],-32768,32767,&a)) { close_client(); return; } axes[i]=(int16_t)a; }
+        if(lg_profile && ready() && input.active) {
+            if(!magic.motion_requested && (abs(axes[0])>300 || abs(axes[2])>300)) lg_begin_motion(&magic);
+            memcpy(last_axes,axes,sizeof(axes));
+            (void)hid_imu(&input,axes,now_ms()); pump();
+        }
+        return;
+    } else if (!strcmp(tokens[0],"LGKEY") && count==3 && number(tokens[2],0,65535,&a)) {
+        if(!lg_profile || !ready()) reply(id,"LG TV profile is unavailable");
+        else if(!lg_key_supported((uint16_t)a)) reply(id,"Unknown LG remote key");
+        else if(!hid_remote_key(&input,id,(uint16_t)a,now_ms())) { reply(id,"LG key queue full"); stop_input(0); }
+        else pump();
     } else if (!strcmp(tokens[0],"MEDIA") && count==3 && number(tokens[2],0,1023,&a)) {
-        if (a!=0xcd && a!=0xb6 && a!=0xb5 && a!=0xb7 && a!=0xe2 && a!=0xe9 && a!=0xea) reply(id,"Unknown media key");
+        if (lg_profile) reply(id,"Use LG remote keys for this TV");
+        else if (a!=0xcd && a!=0xb6 && a!=0xb5 && a!=0xb7 && a!=0xe2 && a!=0xe9 && a!=0xea) reply(id,"Unknown media key");
         else if (!ready() || (!simulation && (!consumer_subscribed || protocol_mode==0))) reply(id,"Media reports unavailable; reconnect or pair this computer again");
         else if (!hid_media(&input,id,(uint16_t)a,now_ms())) { reply(id,"Media queue full"); stop_input(0); }
         else pump();
     } else if (!strcmp(tokens[0],"KEY") && count==3 && number(tokens[2],0,255,&a)) {
-        if (a<0x4f || a>0x52) reply(id,"Unknown arrow key");
+        if (lg_profile) reply(id,"Use LG remote keys for this TV");
+        else if (!hid_key_supported((uint8_t)a)) reply(id,"Unknown keyboard key");
         else if (!ready() || (!simulation && (!keyboard_subscribed || protocol_mode==0))) reply(id,"Keyboard reports unavailable; reconnect or pair this computer again");
         else if (!hid_key(&input,id,(uint8_t)a,now_ms())) { reply(id,"Keyboard queue full"); stop_input(0); }
         else pump();
@@ -420,7 +530,7 @@ static void command(char *line) {
         /* Motion is best-effort: a full queue drops this movement and counts it in dropped_motion.
          * Only button, scroll, media and keyboard overflow stop pointing, because a lost edge needs recovery.
          * Movement also does not emit status; the 250 ms timer and state changes cover it. */
-        if (ready() && input.active) { (void)hid_move(&input,(int32_t)a,(int32_t)b,now_ms()); pump(); }
+        if (!lg_profile && ready() && input.active) { (void)hid_move(&input,(int32_t)a,(int32_t)b,now_ms()); pump(); }
         return;
     } else if (!strcmp(tokens[0],"SCROLL") && count==3 && number(tokens[2],-127,127,&a)) {
         if (!ready() || !input.active) reply((uint32_t)id,"Pointer is off");
@@ -571,7 +681,7 @@ static void tick_event(btstack_timer_source_t *timer) {
     }
     if(!simulation && !probe && (uint32_t)(now-last_battery)>=60000) {
         last_battery=now; int level=battery_level();
-        if(level>=0) battery_service_server_set_battery_value((uint8_t)level);
+        if(level>=0) { remote_battery=(uint8_t)((level*63+50)/100); battery_service_server_set_battery_value((uint8_t)level); }
     }
     if(!working && (uint32_t)(now-started_at)>15000) { errno=ETIMEDOUT; fatal("Bluetooth initialization"); }
     if(client>=0 && (uint32_t)(now-last_seen)>=LEASE_MS) close_client();
@@ -590,10 +700,20 @@ static void tick_event(btstack_timer_source_t *timer) {
 }
 static void establish_ready(void) {
     if(!available() || initialized || stop_pending) return;
+    if(!switching_host) { printf("LINK ready peer=%08x\n",connected_host()); fflush(stdout); }
     hid_stop(&input,0,now_ms()); stop_pending=true; stop_time=now_ms(); pump();
 }
 static void report_snapshot(hci_con_handle_t connection,hid_report_type_t type,uint16_t id,uint16_t size,uint8_t *out) {
     (void)connection; (void)type;
+    if (lg_profile) {
+        memset(out,0,size);
+        if(id==LG_MOTION_REPORT) {
+            uint8_t data[LG_MOTION_SIZE]; int16_t axes[6]; memcpy(axes,last_axes,sizeof(axes)); axes[0]=axes[1]=axes[2]=0;
+            lg_encode(data,0xc4,magic.sequence,remote_battery,false,axes,sent_key?sent_key:sent_buttons&1?0x8044:sent_buttons&2?0x8028:0,0);
+            memcpy(out,data,size<sizeof(data)?size:sizeof(data));
+        }
+        return;
+    }
     if (id==2) { memset(out,0,size); if(size) out[0]=(uint8_t)sent_consumer; if(size>1) out[1]=(uint8_t)(sent_consumer>>8); return; }
     if (id==3) { memset(out,0,size); if(size) out[0]=sent_key; return; }
     size=size<6?size:6; memset(out,0,size); if(size) out[0]=sent_buttons;
@@ -621,6 +741,8 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
             handle=gap_subevent_le_connection_complete_get_connection_handle(packet);
             connected_at=now_ms();
             if(switching_host) printf("SWITCH link peer=%08x elapsed_ms=%u\n",switching_host,(uint32_t)(connected_at-switch_started));
+            else printf("LINK connected interval_units=%u advertising_ms=%u\n",gap_subevent_le_connection_complete_get_conn_interval(packet),(uint32_t)(connected_at-advertising_started));
+            fflush(stdout);
             initialized=false; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=keyboard_subscribed=false; sent_consumer=0; sent_key=0; protocol_mode=1; sent_buttons=0; hid_reset(&input);
             name_attempted=false; name_phase=0; name_connection=HCI_CON_HANDLE_INVALID;
             interval_units=gap_subevent_le_connection_complete_get_conn_interval(packet);
@@ -633,7 +755,8 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
             handle=HCI_CON_HANDLE_INVALID; subscribed=report_subscribed=boot_subscribed=consumer_subscribed=keyboard_subscribed=false; sent_consumer=0; sent_key=0; protocol_mode=1; initialized=false; send_requested=false; stop_pending=false; sent_buttons=0;
             name_phase=0; name_connection=HCI_CON_HANDLE_INVALID; name_attempted=false;
             cancel_queued("Bluetooth disconnected"); hid_reset(&input);
-            hids_device_init(0,descriptor,sizeof(descriptor));
+            control_subscribed=false; control_count=0;
+            printf("LINK disconnected reason=0x%02x\n",hci_event_disconnection_complete_get_reason(packet)); fflush(stdout);
             reconnect_advertising(); send_status();
         }
         break;
@@ -673,6 +796,7 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
             sync_bonds();
             uint32_t added;
             if(hosts_add(&hosts,(uint8_t)slot,(uint8_t)address_type,address,false,&added)) fatal("Saving paired computer");
+            if(lg_pairing && hosts_set_bluetooth_name(&hosts,added,"LG TV")) fatal("Saving LG TV profile");
             pairing_until=0; selected_changed();
         } else if(pairing() || known->id!=hosts.selected_id) { disconnect_host(); break; }
         establish_ready(); send_status(); break;
@@ -689,7 +813,28 @@ static void radio_event(uint8_t type,uint16_t channel,uint8_t *packet,uint16_t s
         send_status(); break;
     case HCI_EVENT_HIDS_META:
         switch(hci_event_hids_meta_get_subevent_code(packet)) {
+        case HIDS_SUBEVENT_SET_REPORT: {
+            if(size<8 || !lg_profile || !encrypted() || hids_subevent_set_report_get_con_handle(packet)!=handle || hids_subevent_set_report_get_report_id(packet)!=LG_COMMAND_REPORT || hids_subevent_set_report_get_report_type(packet)!=HID_REPORT_TYPE_OUTPUT) break;
+            unsigned length=hids_subevent_set_report_get_report_length(packet);
+            if(length+8u>size) break;
+            uint8_t response[30]; size_t response_length=lg_command(&magic,hids_subevent_set_report_get_report_data(packet),length,response);
+            if(response_length) {
+                if(control_count==8) { error_text="LG control queue full"; disconnect_host(); break; }
+                unsigned tail=(control_head+control_count++)%8;
+                memcpy(control_queue[tail].bytes,response,response_length); control_queue[tail].length=(uint8_t)response_length;
+            }
+            pump(); break;
+        }
         case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
+            if(lg_profile) {
+                uint8_t id=hids_subevent_input_report_enable_get_report_id(packet);
+                bool enabled=hids_subevent_input_report_enable_get_enable(packet)!=0;
+                if(id==LG_CONTROL_REPORT) { control_subscribed=enabled; pump(); break; }
+                if(id!=LG_MOTION_REPORT) break;
+                subscribed=report_subscribed=enabled;
+                if(!subscribed) { initialized=false; stop_input(0); } else establish_ready();
+                send_status(); break;
+            }
             if (hids_subevent_input_report_enable_get_report_id(packet)==3) {
                 keyboard_subscribed=hids_subevent_input_report_enable_get_enable(packet)!=0;
                 if (!keyboard_subscribed && sent_key) { stop_input(0); disconnect_host(); }
@@ -763,7 +908,7 @@ static void load_hosts(void) {
             for(unsigned i=0;i<simulation_hosts;i++) {
                 uint8_t address[6]={0xc0,0,0,0,0,(uint8_t)(i+1)}; uint32_t id;
                 char name[40];
-                if(i) snprintf(name,sizeof(name),"Simulated computer %u",i+1); else strcpy(name,"Simulated computer");
+                if(i) snprintf(name,sizeof(name),"Simulated computer %u",i+1); else strcpy(name,simulation_lg?"[LG] webOS TV OLED77G3PSA":"Simulated computer");
                 if(hosts_add(&hosts,(uint8_t)i,1,address,i==0,&id) || hosts_set_bluetooth_name(&hosts,id,name)) fatal("Simulated computer");
             }
             if(hosts.count && hosts_select(&hosts,hosts.records[0].id)) fatal("Selecting simulated computer");
@@ -794,6 +939,7 @@ int main(int argc,char **argv) {
     umask(0007); setvbuf(stdout,NULL,_IOLBF,0);
     for(int i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--simulate")) simulation=true;
+        else if(!strcmp(argv[i],"--simulate-lg")) simulation=simulation_lg=true;
         else if(!strcmp(argv[i],"--probe")) probe=true;
         else if(!strcmp(argv[i],"--simulate-hosts") && i+1<argc) {
             int64_t value; if(!number(argv[++i],0,HOSTS_LIMIT,&value)) return 2; simulation_hosts=(unsigned)value;
@@ -837,16 +983,12 @@ int main(int argc,char **argv) {
         sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION|SM_AUTHREQ_BONDING);
         sm_set_encryption_key_size_range(16,16); gap_random_address_set(address);
         att_server_init(profile_data,NULL,NULL);
-        int migrated=migrate_gatt_subscriptions(tlv,&tlv_context);
-        if(migrated<0) { errno=EIO; fatal("Migrating Bluetooth subscriptions"); }
-        if(migrated) { sync_bonds(); fprintf(stderr,"Preserved subscriptions across compatible GATT update\n"); }
         int level=battery_level();
         if(level<0) { errno=EIO; fatal("Reading battery level"); }
-        battery_service_server_init((uint8_t)level); last_battery=now_ms();
-        hids_device_init(0,descriptor,sizeof(descriptor));
+        battery_service_server_init((uint8_t)level); remote_battery=(uint8_t)((level*63+50)/100); last_battery=now_ms();
+        configure_profile();
         hids_device_register_packet_handler(radio_event); hids_device_register_get_report_callback(report_snapshot);
         bd_addr_t direct={0}; gap_advertisements_set_params(0x30,0x60,0,0,direct,7,0);
-        gap_advertisements_set_data(sizeof(advertising),advertising);
         hci_events.callback=radio_event; hci_add_event_handler(&hci_events); sm_events.callback=radio_event; sm_add_event_handler(&sm_events);
         hci_power_control(HCI_POWER_ON);
     }

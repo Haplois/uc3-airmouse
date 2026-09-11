@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Repair a duplicate Remote 3 primary slot and install boot-time protection."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+
+def address(value):
+    value = value.lower()
+    if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', value):
+        raise argparse.ArgumentTypeError('Expected a Bluetooth MAC address')
+    return value
+
+
+def repair_program(primary, secondary, expected_scd):
+    return f'''import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+
+PRIMARY = {primary!r}
+SECONDARY = {secondary!r}
+EXPECTED_SCD = {expected_scd!r}
+ROOT = Path('/var/lib/webosbrew/airmouse-lg-receiver')
+MRCU = Path('/mnt/lg/cmn_data/mrcu')
+FILES = ('mrcu1.info', 'mrcu1.scd', 'mrcu2.info', 'mrcu2.scd')
+
+def info_address(path):
+    match = re.search(r'^BDAddr\\s*=\\s*([0-9a-f:]{{17}})\\s*$', path.read_text(), re.I | re.M)
+    return match.group(1).lower() if match else ''
+
+def scd_address(path):
+    match = re.search(rb'(?:[0-9a-f]{{2}}:){{5}}[0-9a-f]{{2}}', path.read_bytes().lower())
+    return match.group().decode() if match else ''
+
+if info_address(MRCU / 'mrcu1.info') == PRIMARY and info_address(MRCU / 'mrcu2.info') == SECONDARY:
+    if scd_address(MRCU / 'mrcu1.scd') != PRIMARY or scd_address(MRCU / 'mrcu2.scd') != SECONDARY:
+        raise RuntimeError('Slot records and calibration identities disagree')
+    print('Receiver slots already have distinct identities')
+    raise SystemExit(0)
+
+if (info_address(MRCU / 'mrcu1.info'), info_address(MRCU / 'mrcu2.info'),
+        scd_address(MRCU / 'mrcu1.scd'), scd_address(MRCU / 'mrcu2.scd')) != (
+        SECONDARY, SECONDARY, SECONDARY, SECONDARY):
+    raise RuntimeError('Refusing to modify an unrecognized receiver slot state')
+
+backup = ROOT / 'slot-repair-before'
+if backup.exists():
+    raise RuntimeError('The protected pre-repair backup already exists')
+backup.mkdir(mode=0o700)
+for name in FILES:
+    shutil.copy2(MRCU / name, backup / name)
+
+subprocess.check_call(['systemctl', 'stop', 'airmouse-lg-link.service',
+                       'bthidmanager.service', 'lginput2.service'])
+try:
+    info = (MRCU / 'mrcu1.info').read_bytes()
+    old = ('BDAddr = ' + SECONDARY).encode()
+    new = ('BDAddr = ' + PRIMARY).encode()
+    if info.count(old) != 1:
+        raise RuntimeError('Primary info address is not unique')
+    scd = (MRCU / 'mrcu1.scd').read_bytes()
+    if scd.count(SECONDARY.encode()) != 1:
+        raise RuntimeError('Primary SCD address is not unique')
+    repaired_scd = scd.replace(SECONDARY.encode(), PRIMARY.encode())
+    if EXPECTED_SCD and hashlib.sha256(repaired_scd).hexdigest() != EXPECTED_SCD:
+        raise RuntimeError('Reconstructed primary SCD checksum mismatch')
+    replacements = {{'mrcu1.info': info.replace(old, new), 'mrcu1.scd': repaired_scd}}
+    for name, data in replacements.items():
+        temporary = MRCU / (name + '.airmouse-new')
+        temporary.write_bytes(data)
+        temporary.chmod(0o644)
+        os.replace(temporary, MRCU / name)
+    if info_address(MRCU / 'mrcu1.info') != PRIMARY or scd_address(MRCU / 'mrcu1.scd') != PRIMARY:
+        raise RuntimeError('Repaired primary slot did not validate')
+    subprocess.check_call(['/usr/bin/python3', str(ROOT / 'startup.py'), 'boot'])
+except Exception:
+    for name in FILES:
+        shutil.copy2(backup / name, MRCU / name)
+    subprocess.call(['systemctl', 'start', 'lginput2.service', 'bthidmanager.service'])
+    raise
+print('Original remote restored to slot 0; Remote 3 retained in slot 1')
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True, help='root@TV-host')
+    parser.add_argument('--remote', required=True, help='root@Remote-3-host')
+    parser.add_argument('--primary-address', type=address, required=True)
+    parser.add_argument('--secondary-address', type=address, required=True)
+    parser.add_argument('--primary-scd-sha256', default='')
+    args = parser.parse_args()
+    if args.primary_address == args.secondary_address:
+        parser.error('Primary and secondary addresses must differ')
+    if args.primary_scd_sha256 and not re.fullmatch(r'[0-9a-f]{64}', args.primary_scd_sha256):
+        parser.error('Expected a lowercase SHA-256 digest')
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv, remote = deploy['TV'](args.tv), deploy['TV'](args.remote)
+    status = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 3000 -f '
+                               'luna://com.webos.service.bluetooth2/device/getStatus "{}"', tty=True))
+    paired = {device.get('address', '').lower() for device in status.get('devices', [])
+              if device.get('paired') is True}
+    if not {args.primary_address, args.secondary_address} <= paired:
+        parser.error('Both remote Bluetooth bonds must still exist on the TV')
+    remote_running = remote.ssh('systemctl is-active airmouse-bluetooth.service || true').strip() == 'active'
+    try:
+        if remote_running:
+            remote.ssh('systemctl stop airmouse-bluetooth.service')
+        print(tv.ssh('/usr/bin/python3 -', data=repair_program(
+            args.primary_address, args.secondary_address, args.primary_scd_sha256).encode()))
+        subprocess.run([sys.executable, str(Path(__file__).with_name('airmouse-lg-install-link')),
+                        '--host', args.tv], check=True)
+    finally:
+        if remote_running:
+            remote.ssh('systemctl start airmouse-bluetooth.service')
+    print('Receiver slots repaired and protected across TV boots.')
+
+
+if __name__ == '__main__':
+    main()

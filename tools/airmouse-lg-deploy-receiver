@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Deploy or roll back the reviewed LG receiver experiment for the current boot."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import time
+
+STOCK_SHA256 = 'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b'
+PREVIOUS_SHA256 = '971bc4fce21529adcdf194f9226aa3bfa44ad0d4ad462ab4902112aeca360b70'
+PATCHED_SHA256 = 'e0d7097ef21fe83af854633307f82f169d5b9e653887de40bdc8004ea88420e3'
+STAGE = '/tmp/airmouse-lg-receiver-v5'
+TARGET = '/usr/sbin/lginput2'
+TIMER = 'airmouse-lg-receiver-rollback'
+
+ROLLBACK = f'''#!/bin/sh
+set -eu
+if grep -q ' {TARGET} ' /proc/mounts; then
+    case "$(sha256sum {TARGET} | cut -d ' ' -f 1)" in
+        {PATCHED_SHA256}|{PREVIOUS_SHA256}) ;;
+        *) exit 1 ;;
+    esac
+    systemctl stop lginput2.service
+    umount {TARGET}
+fi
+test "$(sha256sum {TARGET} | cut -d ' ' -f 1)" = {STOCK_SHA256}
+systemctl restart lginput2.service
+systemctl stop {TIMER}.timer || true
+systemctl is-active lginput2.service
+echo 'Original receiver restored; pairing database was not replaced.'
+'''
+
+ACTIVATE = f'''#!/bin/sh
+set -eu
+case "$(sha256sum {TARGET} | cut -d ' ' -f 1)" in
+    {STOCK_SHA256}) ! grep -q ' {TARGET} ' /proc/mounts ;;
+    {PREVIOUS_SHA256}) grep -q ' {TARGET} ' /proc/mounts ;;
+    *) exit 1 ;;
+esac
+test "$(sha256sum {STAGE}/lginput2 | cut -d ' ' -f 1)" = {PATCHED_SHA256}
+test ! -e {STAGE}/paired-state-before
+cp -a /mnt/lg/cmn_data/mrcu {STAGE}/paired-state-before
+systemd-run --unit={TIMER} --on-active=120s /bin/sh {STAGE}/rollback.sh
+systemctl stop lginput2.service
+if grep -q ' {TARGET} ' /proc/mounts; then umount {TARGET}; fi
+mount --bind {STAGE}/lginput2 {TARGET}
+systemctl restart lginput2.service
+'''
+
+
+class TV:
+    def __init__(self, host):
+        if not re.fullmatch(r'root@[A-Za-z0-9.-]+', host):
+            raise ValueError('Use an explicit root@TV-host destination')
+        self.host = host
+
+    def ssh(self, command, *, data=None, tty=False):
+        args = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5']
+        if tty:
+            args.append('-tt')
+        result = subprocess.run([*args, self.host, command], input=data,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=45, check=True)
+        return result.stdout.decode().replace('\r', '')
+
+    def upload(self, name, data):
+        self.ssh(f'umask 077; cat > {STAGE}/{name}; chmod 700 {STAGE}/{name}', data=data)
+
+    def api(self, method, payload):
+        body = shlex.quote(json.dumps(payload))
+        output = self.ssh('/usr/bin/luna-send -n 1 -w 3000 -f '
+                          f'luna://com.webos.service.mrcu/{method} {body}', tty=True)
+        response = json.loads(output)
+        if response.get('returnValue') is not True:
+            raise ValueError(f'Receiver API {method} failed')
+        return response
+
+    def health(self):
+        output = self.ssh('systemctl is-active lginput2.service; '
+                          'pid=$(systemctl show lginput2.service -p MainPID --value); '
+                          'echo "$pid"; sha256sum "/proc/$pid/exe"').splitlines()
+        if len(output) != 3 or output[0] != 'active' or output[2].split()[0] != PATCHED_SHA256:
+            raise ValueError('Receiver service or running executable hash does not match')
+        self.api('getAPIVersion', {})
+        return output[1]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='root@TV-host, not the Remote 3')
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--binary', type=Path)
+    mode.add_argument('--rollback', action='store_true')
+    mode.add_argument('--enable-dual', action='store_true',
+                      help='Enable the second slot after the original remote registers in the first')
+    args = parser.parse_args()
+    activated = False
+    tv = None
+    try:
+        tv = TV(args.host)
+        if args.rollback:
+            print(tv.ssh(f'/bin/sh {STAGE}/rollback.sh'))
+            return
+        if args.enable_dual:
+            tv.health()
+            if tv.api('isPaired', {}).get('isPaired') is not True:
+                raise ValueError('Register the original LG remote in the primary slot first')
+            tv.api('enableDualPairing', {'enable': True})
+            print('Second pairing slot enabled. Use Pair LG TV on Remote 3.')
+            return
+        data = args.binary.read_bytes()
+        if hashlib.sha256(data).hexdigest() != PATCHED_SHA256:
+            raise ValueError('Not the tested receiver build')
+        tv.ssh('test ! -e /var/lib/webosbrew/airmouse-lg-receiver/boot-hook || '
+               '{ echo "Use airmouse-lg-upgrade-receiver for an installed startup hook" >&2; exit 1; }')
+        status = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 3000 -f '
+                                 'luna://com.webos.service.bluetooth2/device/getStatus "{}"', tty=True))
+        if status.get('returnValue') is not True:
+            raise ValueError('Cannot check TV Bluetooth connections')
+        if any(device.get('address') == 'e8:7c:c2:97:74:5a' and device.get('connectedProfiles')
+               for device in status.get('devices', [])):
+            raise ValueError('Stop Remote 3 Bluetooth during receiver deployment to prevent an early secondary reconnect')
+        # Refuse to overwrite an active or previous trial and its private backup.
+        current_hash = tv.ssh(f'sha256sum {TARGET}').split()[0]
+        if current_hash not in (STOCK_SHA256, PREVIOUS_SHA256):
+            raise ValueError('Unexpected installed receiver build')
+        tv.ssh(f'test ! -e {STAGE} && umask 077 && mkdir {STAGE}')
+        tv.upload('lginput2', data)
+        tv.upload('rollback.sh', ROLLBACK.encode())
+        tv.upload('activate.sh', ACTIVATE.encode())
+        activated = True
+        tv.ssh(f'/bin/sh {STAGE}/activate.sh')
+        last_error = None
+        for _ in range(10):
+            try:
+                pid = tv.health()
+                break
+            except (subprocess.SubprocessError, ValueError) as error:
+                last_error = error
+                time.sleep(1)
+        else:
+            raise ValueError(f'Receiver did not become healthy: {last_error}')
+        primary_paired = tv.api('isPaired', {}).get('isPaired') is True
+        tv.api('enableDualPairing', {'enable': primary_paired})
+        time.sleep(5)
+        if tv.health() != pid:
+            raise ValueError('Receiver restarted during the health check')
+        tv.ssh(f'systemctl stop {TIMER}.timer')
+        print(json.dumps({'deployed_sha256': PATCHED_SHA256, 'pid': int(pid),
+                          'dual_pairing_enabled': primary_paired,
+                          'next_step': ('Pair Remote 3' if primary_paired else
+                                        'Register original LG remote, then use --enable-dual'),
+                          'lifetime': 'Current boot; hardware coexistence needs testing'}, indent=2))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if activated:
+            try:
+                tv.ssh(f'/bin/sh {STAGE}/rollback.sh')
+                print('Deployment failed; original receiver restored.')
+            except (OSError, subprocess.SubprocessError):
+                print('Immediate rollback could not be confirmed; check the TV rollback timer.')
+        parser.exit(1, f'{error}\n')
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Observe display idle and LG rest without injecting input or changing settings."""
+import argparse
+import json
+import re
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--seconds', type=int, default=45)
+parser.add_argument('--require-rest', action='store_true')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host) or not 1 <= args.seconds <= 300:
+    parser.error('Expected user@host and 1–300 seconds')
+script = r'''
+import fs from 'node:fs';
+const base = '/mnt/data/airmouse/state';
+const key = fs.readFileSync(base+'/core-api-key','utf8').trim();
+const end = performance.now() + SECONDS * 1000;
+let last, sawDisplayOff=false, sawRest=false;
+while(performance.now()<end) {
+  const response = await fetch('http://127.0.0.1/api/system/power', {headers:{Authorization:'Bearer '+key}, signal:AbortSignal.timeout(2000)});
+  if(!response.ok) throw new Error('Power status HTTP '+response.status);
+  const power=await response.json(), state=JSON.parse(fs.readFileSync(base+'/status.json'));
+  const brightness=Number(fs.readFileSync('/sys/class/backlight/display-backlight/actual_brightness','utf8'));
+  const result={mode:power.mode,brightness,pointer:state.pointer,enabled:state.pointer_enabled,resting:state.resting,sampling:state.applied_sampling,interval:state.output_metrics?.bluetooth?.connection_interval_ms,error:state.error};
+  const line=JSON.stringify(result);
+  if(line!==last) { console.log(new Date().toISOString()+' '+line); last=line; }
+  sawDisplayOff ||= brightness===0;
+  sawRest ||= state.resting===true && state.applied_sampling===null;
+  if(state.error) throw new Error(state.error);
+  await new Promise(resolve=>setTimeout(resolve,1000));
+}
+console.log(JSON.stringify({display_off_observed:sawDisplayOff,rest_observed:sawRest}));
+if(REQUIRE && (!sawDisplayOff || !sawRest)) process.exitCode=1;
+'''.replace('SECONDS', str(args.seconds)).replace('REQUIRE', json.dumps(args.require_rest))
+result = subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=8',args.host,
+                         'node --input-type=module'], input=script, text=True)
+raise SystemExit(result.returncode)

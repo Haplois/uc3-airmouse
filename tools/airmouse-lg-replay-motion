@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+// Replays sensor arrival batches through the real LG output scheduler, without Bluetooth.
+import fs from 'node:fs';
+import { mock } from 'node:test';
+import { HidOutput } from '../runtime/hid-output.mjs';
+import { lgMotion } from '../runtime/target-profile.mjs';
+
+if (process.argv.length !== 3) {
+  console.error('Usage: tools/airmouse-lg-replay-motion SENSOR.jsonl'); process.exit(2);
+}
+const samples = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').map(line => JSON.parse(line));
+if (samples.length < 2 || samples.some((sample, index) => !Number.isFinite(sample.received_time)
+    || !lgMotion(sample) || (index && sample.received_time < samples[index - 1].received_time))) {
+  throw new Error('Expected ordered sensor samples with received_time from airmouse-lg-record-sensor');
+}
+const first = samples[0].received_time, last = samples.at(-1).received_time;
+if (last - first < 1 || last - first > 601) throw new Error('Expected a recording between 1 and 600 seconds');
+const tv = { id: '00000001', name: 'TV', bluetooth_name: '[LG] webOS TV OLED77G3PSA', custom_name: '', legacy: false };
+let now = 1000, cursor = 0;
+const sent = [];
+const output = new HidOutput({ clock: () => now, movementRateHz: 1000 });
+output.connected = true;
+output.acceptState({ ready: true, paired: true, pairing: false, active: true, working: true,
+  connected: true, selected: tv.id, connected_device: tv.id, devices: [tv], host_limit: 4,
+  buttons: 0, dropped_motion: 0, error: '', interval_ms: 7.5, reports_sent: 0 }, 2);
+output.endpoint = tv; output.generation = 1;
+output.socket = { writable: true, writableLength: 0, write() { sent.push(now); } };
+mock.timers.enable({ apis: ['setTimeout'] });
+try {
+  for (let elapsed = 0; elapsed <= Math.ceil((last - first) * 1000) + 75; elapsed++) {
+    now = 1000 + elapsed;
+    while (cursor < samples.length && (samples[cursor].received_time - first) * 1000 <= elapsed) {
+      const sample = samples[cursor++];
+      output.imu(lgMotion({ ...sample, generation: 1, time: sample.time - first + 1 }));
+    }
+    mock.timers.tick(1);
+  }
+} finally { output.invalidate(2); mock.timers.reset(); }
+const gaps = sent.slice(1).map((time, index) => time - sent[index]).sort((a, b) => a - b);
+const batches = new Set(samples.map(sample => sample.received_time)).size;
+const rate = (sent.length - 1) * 1000 / (sent.at(-1) - sent[0]);
+console.log(JSON.stringify({ sensor_samples: samples.length, arrival_batches: batches,
+  arrival_batch_rate_hz: (batches - 1) / (last - first), emitted_reports: sent.length,
+  output_rate_hz: rate, p95_gap_ms: gaps[Math.floor(gaps.length * 0.95)], max_gap_ms: gaps.at(-1),
+  stale_or_overflow_drops: output.dropped, native_cadence_pass: rate >= 95 && rate <= 101 }, null, 2));
+if (!(rate >= 95 && rate <= 101)) process.exitCode = 1;

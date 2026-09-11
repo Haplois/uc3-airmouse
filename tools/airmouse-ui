@@ -41,6 +41,7 @@ if args.command == 'package':
         add('release.json', (json.dumps(metadata, indent=2) + '\n').encode())
         add('bin/remote-ui', binary.read_bytes(), 0o755)
         add('data/LICENSE', (root / 'native/LICENSE').read_bytes())
+        add('data/ASSETS.md', (root / 'native/ASSETS.md').read_bytes())
         add('data/airmouse-source.txt', b'Custom UI source: uc3-airmouse/native and tools/airmouse-ui-build\nUpstream: https://github.com/unfoldedcircle/remote-ui\nRevision: f3d34daea76239a92b5d43793f9eb849e5d0fc19\n')
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(archive.suffix + '.sha256').write_text(f'{digest}  {archive.name}\n')

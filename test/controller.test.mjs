@@ -25,6 +25,85 @@ function ownedV2(output, selected = '00000001') {
   return output;
 }
 
+test('LG rests after fifteen seconds while computer pointing retains its timeout', async t => {
+  const { controller, output } = setup(t);
+  output.backend = 'owned';
+  output.targets.find(target => target.id === controller.target).bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  controller.touch();
+  assert.equal(controller.idle._idleTimeout, 15000);
+  output.targets.find(target => target.id === controller.target).bluetooth_name = 'Desktop';
+  controller.touch();
+  assert.ok(controller.idle);
+});
+
+test('LG rest restores the sensor, preserves intent, and wakes without changing calibration', async t => {
+  const { controller, sensor, output } = setup(t);
+  output.backend = 'owned'; output.imu = () => {};
+  output.targets[0].bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  let wake;
+  sensor.watchWake = callback => { wake = callback; };
+  const config = JSON.stringify(controller.config);
+  await controller.activate();
+  assert.equal(sensor.rate, 200);
+  await controller.rest();
+  assert.equal(sensor.record, null);
+  assert.equal(controller.state().pointer_enabled, true);
+  assert.equal(controller.state().resting, true);
+  assert.equal(output.endpoint, null);
+  wake(); await tick(); await tick();
+  assert.equal(controller.pointer, true);
+  assert.equal(controller.resting, false);
+  assert.equal(sensor.rate, 200);
+  assert.equal(JSON.stringify(controller.config), config);
+});
+
+test('explicit stop cancels a stale pickup and resting mouse clicks resume before delivery', async t => {
+  const { controller, sensor, output } = setup(t);
+  output.backend = 'owned'; output.buttonEdges = true; output.imu = () => {};
+  output.targets[0].bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  let wake;
+  sensor.watchWake = callback => { wake = callback; };
+  await controller.activate(); await controller.rest();
+  await controller.button(1, true);
+  assert.equal(controller.pointer, true);
+  assert.equal(output.buttonCalls.at(-1).down, true);
+  await controller.button(1, false);
+  await controller.rest(); await controller.stop();
+  wake(); await tick();
+  assert.equal(controller.pointer, false);
+  assert.equal(controller.state().pointer_enabled, false);
+});
+
+test('held buttons defer rest and motion refreshes its deadline', async t => {
+  const { controller, sensor, output } = setup(t);
+  output.backend = 'owned'; output.imu = () => {};
+  output.targets[0].bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  await controller.activate();
+  output.buttons = 1;
+  await controller.rest();
+  assert.equal(controller.pointer, true);
+  const timer = controller.idle;
+  sensor.callback([{ time: 1, gyro: [0.1, 0, 0], accel: [0, 0, 9.81] }]);
+  assert.notEqual(controller.idle, timer);
+});
+
+test('LG power sends Bluetooth while connected and a wake packet while disconnected', async t => {
+  const { controller, output } = setup(t);
+  output.backend = 'owned';
+  output.targets.find(target => target.id === controller.target).bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  const calls = [];
+  output.key = async (target, key) => calls.push({ target, key });
+  controller.wakeTV = async config => calls.push(config);
+  controller.config.lg_tv_power = { 'host.a': { mac: '02:11:22:33:44:55', broadcast: '192.168.1.255' } };
+  await controller.apply({ type: 'power' });
+  assert.deepEqual(calls, [{ target: 'host.a', key: 'power' }]);
+  output.ready = () => false;
+  await controller.apply({ type: 'power' });
+  assert.deepEqual(calls[1], controller.config.lg_tv_power['host.a']);
+  output.targets[0].bluetooth_name = 'Desktop';
+  await assert.rejects(controller.apply({ type: 'power' }), /LG TV profile/);
+});
+
 test('explicit ON and OFF are idempotent and restore original settings', async t => {
   const { controller, sensor } = setup(t), baseline = sensor.snapshot();
   await controller.apply({ type: 'on' }); const generation = controller.generation;
@@ -250,7 +329,7 @@ test('a v2 selection change during OPEN invalidates activation and restores the 
 test('home quick switch preserves pointing intent and resumes only when the new host is ready', async t => {
   const fixture = fakeSensor(t), output = ownedV2(fakeOutput());
   const controller = new Controller({ sensor: fixture.sensor, output, configFile: fixture.configFile });
-  controller.nativeControl = true; t.after(() => controller.stop());
+  controller.nativeControl = true; t.after(() => controller.releaseControl('Test cleanup'));
   let ready = true;
   output.ready = id => ready && id === output.selectedTarget;
   output.select = async id => { assert.equal(controller.pointer, false); assert.equal(output.endpoint, null); output.selectedTarget = id; ready = false; };
@@ -382,4 +461,78 @@ test('control ownership is written only through the controller', async t => {
   controller.acquireControl(); await controller.apply({ type: 'on' }); assert.equal(controller.pointer, true);
   await controller.releaseControl('Air mouse screen closed');
   assert.equal(controller.pointer, false); assert.equal(controller.nativeControl, false); assert.equal(controller.reason, 'Air mouse screen closed');
+});
+
+function disconnectedOwned(t) {
+  const fixture = fakeSensor(t), output = ownedV2(fakeOutput());
+  output.targets[0].ready = false; output.targets[0].connected = false;
+  output.reconnectCalls = 0; output.reconnect = async () => { output.reconnectCalls++; };
+  const controller = new Controller({ sensor: fixture.sensor, output, configFile: fixture.configFile, reconnectHoldMs: 50, ownershipStartupMs: 0 });
+  controller.nativeControl = true; t.after(() => controller.stop());
+  return { ...fixture, output, controller };
+}
+
+test('physical input while the selected computer is disconnected requests one reconnect', async t => {
+  const { controller, output } = disconnectedOwned(t);
+  output.key = async () => { throw new Error('should not send while disconnected'); };
+  output.media = output.key; output.button = output.key;
+  assert.equal(controller.disconnected, true);
+  await assert.rejects(controller.apply({ type: 'key', key: 'up' }), /Reconnecting/);
+  await assert.rejects(controller.apply({ type: 'media', key: 'mute' }), /Reconnecting/);
+  await assert.rejects(controller.button(1, true), /Reconnecting/);
+  await assert.rejects(controller.apply({ type: 'on' }), /Reconnecting/);
+  assert.equal(output.reconnectCalls, 1, 'rate limited to one request inside the hold window');
+  assert.equal(controller.state().reconnecting, true);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  await controller.apply({ type: 'reconnect' });
+  assert.equal(output.reconnectCalls, 2);
+  await assert.rejects(controller.apply({ type: 'reconnect' }), /already requested/);
+  output.targets[0].ready = true; output.targets[0].connected = true;
+  assert.equal(controller.disconnected, false);
+  await assert.rejects(controller.apply({ type: 'reconnect' }), /not disconnected/);
+  const sent = []; output.key = async (target, key) => sent.push(key);
+  await controller.apply({ type: 'key', key: 'up' });
+  assert.deepEqual(sent, ['up']);
+});
+
+test('a disconnected target with the app open retries on a timer until it connects', async t => {
+  const { controller, output } = disconnectedOwned(t);
+  controller.reconnectRetryMs = 20; controller.reconnectHoldMs = 5;
+  controller.syncReconnectWatch();
+  assert.equal(controller.reconnectTimer.hasRef?.(), false, 'retry timer does not own process lifetime');
+  t.after(() => clearInterval(controller.reconnectTimer));
+  await new Promise(resolve => setTimeout(resolve, 75));
+  assert.ok(output.reconnectCalls >= 2, `expected periodic retries, got ${output.reconnectCalls}`);
+  output.targets[0].ready = true; output.targets[0].connected = true;
+  controller.syncOutput(); await tick();
+  const settled = output.reconnectCalls;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(output.reconnectCalls, settled, 'no retries once connected');
+  assert.equal(controller.reconnectTimer, null);
+});
+
+test('a shake while disconnected requests a reconnect and the watcher stops once connected', async t => {
+  const { controller, output, sensor } = disconnectedOwned(t);
+  let wake = null, closed = 0;
+  sensor.watchWake = callback => { wake = callback; };
+  sensor.closeReader = () => { closed++; wake = null; };
+  controller.syncReconnectWatch();
+  assert.ok(wake, 'wake watcher armed while disconnected');
+  wake(); await tick();
+  assert.equal(output.reconnectCalls, 1);
+  output.targets[0].ready = true; output.targets[0].connected = true;
+  controller.syncOutput(); await tick();
+  assert.equal(wake, null, 'watcher released once the target is ready');
+  assert.ok(closed >= 1);
+  controller.nativeControl = false; controller.syncReconnectWatch(); assert.equal(wake, null);
+});
+
+test('LG power while disconnected wakes the TV and also asks for a Bluetooth reconnect', async t => {
+  const { controller, output } = disconnectedOwned(t);
+  output.targets[0].bluetooth_name = '[LG] webOS TV OLED77G3PSA';
+  const wakes = []; controller.wakeTV = async config => wakes.push(config);
+  controller.config.lg_tv_power = { '00000001': { mac: '02:11:22:33:44:55', broadcast: '192.168.1.255' } };
+  await controller.apply({ type: 'power' });
+  assert.deepEqual(wakes, [controller.config.lg_tv_power['00000001']]);
+  assert.equal(output.reconnectCalls, 1);
 });

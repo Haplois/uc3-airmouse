@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Record Remote 3 sensor axes alongside a passive LG Bluetooth recording."""
+import argparse
+import datetime
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+
+RECORDER = r'''
+const { Sensor } = await import('/mnt/data/airmouse/current/runtime/sensor.mjs');
+const sensor = new Sensor({ stateDir: '/mnt/data/airmouse/state' });
+let finish;
+const done = new Promise(resolve => { finish = resolve; });
+let failure;
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, finish);
+try {
+  sensor.restore();
+  sensor.begin(RATE, 2000);
+  const wallOffset = Date.now() / 1000 - Number(process.hrtime.bigint()) / 1e9;
+  sensor.start(1, samples => {
+    const received_time = Number(process.hrtime.bigint()) / 1e9;
+    for (const sample of samples) process.stdout.write(JSON.stringify({ ...sample, received_time, wall_time: wallOffset + sample.time }) + '\n');
+  }, error => { failure = error; finish(); });
+  console.error('SENSOR_CAPTURE_READY: recording for SECONDS seconds');
+  const timer = setTimeout(finish, SECONDS * 1000);
+  await done;
+  clearTimeout(timer);
+} finally { sensor.restore(); }
+if (failure) throw failure;
+console.error('SENSOR_CAPTURE_COMPLETE');
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default='root@10.0.10.51')
+    parser.add_argument('--seconds', type=int, default=300)
+    parser.add_argument('--rate', type=int, choices=[25, 50, 100, 200, 400, 800], default=100)
+    parser.add_argument('--output', type=pathlib.Path)
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host) or not 1 <= args.seconds <= 600:
+        parser.error('Expected user@host and duration 1..600 seconds')
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    destination = args.output or pathlib.Path('/tmp/airmouse-lg-evidence') / f'remote3-axes-{stamp}.jsonl'
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8',
+           '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2', args.host]
+    status = subprocess.run(ssh + ['systemctl is-active --quiet airmouse.service'])
+    if status.returncode not in (0, 3):
+        status.check_returncode()
+    was_active = status.returncode == 0
+    with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as output:
+        try:
+            subprocess.run(ssh + ['systemctl stop airmouse.service'], check=True, timeout=40)
+            command = ['systemd-run', '--wait', '--pipe', '--collect', '--unit=airmouse-lg-sensor-record',
+                       '-p', 'User=airmouse', '-p', 'Group=airmouse', '-p', 'SupplementaryGroups=input', '-p', 'RuntimeDirectory=airmouse',
+                       '-p', f'RuntimeMaxSec={args.seconds + 20}',
+                       '-p', 'ExecStopPost=/usr/bin/node /mnt/data/airmouse/current/runtime/main.mjs recover',
+                       '-E', 'AIRMOUSE_STATE=/mnt/data/airmouse/state',
+                       '/usr/bin/flock', '-F', '-n', '/run/airmouse/sensor.lock',
+                       '/usr/bin/node', '--input-type=module', '-']
+            subprocess.run(ssh + [shlex.join(command)], input=RECORDER.replace('SECONDS', str(args.seconds)).replace('RATE', str(args.rate)).encode(),
+                           stdout=output, check=True, timeout=args.seconds + 45)
+        finally:
+            if was_active:
+                subprocess.run(ssh + ['systemctl start airmouse.service'], check=True, timeout=40)
+    print(f'Saved sensor axes to {destination}', flush=True)
+
+
+if __name__ == '__main__':
+    main()

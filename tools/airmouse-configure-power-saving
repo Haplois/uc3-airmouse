@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Apply conservative screen, button-light and sleep settings with a saved rollback."""
+import argparse
+import json
+import re
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--restore', action='store_true')
+args = parser.parse_args()
+if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
+    parser.error('Expected user@host')
+script = r'''
+import fs from 'node:fs';
+const root='/mnt/data/airmouse/state', file=root+'/power-saving-settings.json';
+const key=fs.readFileSync(root+'/core-api-key','utf8').trim();
+async function api(path,method='GET',body) {
+ const r=await fetch('http://127.0.0.1/api/cfg/'+path,{method,headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(3000)});
+ if(!r.ok) throw new Error(path+' HTTP '+r.status);
+ return r.json();
+}
+const fields={display:['brightness','auto_brightness'],button:['brightness','auto_brightness'],power_saving:['display_off_sec','standby_sec','wakeup_sensitivity']};
+const pick=(value,keys)=>Object.fromEntries(keys.map(key=>[key,value[key]]));
+let journal=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
+if(RESTORE&&!journal) throw new Error('No saved power settings');
+if(!journal) {
+ journal={before:{},applied:{}};
+ for(const [path,keys] of Object.entries(fields)) journal.before[path]=pick(await api(path),keys);
+ journal.applied={display:{brightness:Math.min(journal.before.display.brightness,60),auto_brightness:true},button:{brightness:Math.min(journal.before.button.brightness,25),auto_brightness:true},power_saving:{display_off_sec:Math.min(journal.before.power_saving.display_off_sec||10,10),standby_sec:60,wakeup_sensitivity:journal.before.power_saving.wakeup_sensitivity}};
+ fs.writeFileSync(file,JSON.stringify(journal,null,2)+'\n',{flag:'wx',mode:0o600});
+}
+for(const [path,keys] of Object.entries(fields)) {
+ const current=pick(await api(path),keys);
+ const owned=keys.every(key=>current[key]===journal.before[path][key]||current[key]===journal.applied[path][key]);
+ if(!owned) throw new Error('Power setting changed outside this tool: '+path);
+ const desired=(RESTORE?journal.before:journal.applied)[path];
+ if(keys.some(key=>current[key]!==desired[key])) await api(path,'PATCH',desired);
+ const actual=pick(await api(path),keys);
+ if(JSON.stringify(actual)!==JSON.stringify(desired)) throw new Error('Power settings readback failed: '+path);
+ console.log(path+' '+JSON.stringify(actual));
+}
+if(RESTORE)fs.unlinkSync(file);
+'''.replace('RESTORE', json.dumps(args.restore))
+result = subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=8',args.host,
+                         'node --input-type=module'], input=script, text=True)
+raise SystemExit(result.returncode)

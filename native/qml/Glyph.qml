@@ -8,6 +8,7 @@ Canvas {
     readonly property string resolvedKind: kind === "device" ? classifyDevice(bluetoothName, deviceName) : kind
     function classifyDeviceName(name) {
         var value = (name || "").toLowerCase();
+        if (/(^|[^a-z])lg([^a-z]|$)/.test(value) && /(webos|\btv\b|\boled\d)/.test(value)) return "lg-tv";
         if (/(^|[^a-z])ipad([^a-z]|$)/.test(value)) return "ipad";
         if (/(^|[^a-z])iphone([^a-z]|$)/.test(value)) return "iphone";
         if (/(^|[^a-z])(android|pixel|galaxy|oneplus)([^a-z]|$)/.test(value) || /(^|[^a-z])sm-[a-z0-9]+/.test(value)) return "android";
@@ -36,6 +37,11 @@ Canvas {
         else if (resolvedKind === "desktop") {
             c.rect(1.5,4,14,11); c.moveTo(8.5,15); c.lineTo(8.5,19); c.moveTo(5.5,19); c.lineTo(11.5,19);
             c.rect(18,4,4.5,17); c.moveTo(19.5,7); c.lineTo(21,7);
+        }
+        else if (resolvedKind === "lg-tv") {
+            c.rect(1.5,3.5,21,14); c.moveTo(7,17.5); c.lineTo(5,21); c.moveTo(17,17.5); c.lineTo(19,21);
+            c.moveTo(7,7); c.lineTo(7,14); c.lineTo(10,14);
+            c.moveTo(17,8); c.lineTo(13,8); c.lineTo(13,14); c.lineTo(17,14); c.lineTo(17,11); c.lineTo(15,11);
         }
         else if (resolvedKind === "laptop") {
             c.rect(4,3,16,13); c.moveTo(4,18); c.lineTo(2,20.5); c.lineTo(22,20.5); c.lineTo(20,18); c.closePath();

@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Upgrade the existing v4 TV startup installation to the tested v5 receiver."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import time
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='root@TV-host')
+    parser.add_argument('--remote-host', required=True, help='root@Remote-3-host')
+    parser.add_argument('--binary', required=True, type=Path)
+    args = parser.parse_args()
+    local = Path(__file__).with_name('lib')
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    upgrade = runpy.run_path(str(local / 'lg_receiver_upgrade.py'))
+    tv, remote = deploy['TV'](args.host), deploy['TV'](args.remote_host)
+    stage = str(upgrade['STAGE'])
+    resume = []
+    armed = False
+    try:
+        data = args.binary.read_bytes()
+        if hashlib.sha256(data).hexdigest() != upgrade['NEW']:
+            raise ValueError('Candidate is not the tested receiver build')
+        if tv.ssh('sha256sum /usr/sbin/lginput2').split()[0] != upgrade['OLD']:
+            raise ValueError('Expected the working v4 receiver')
+        # Do not wake or change the TV's power state as part of deployment.
+        power = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 3000 -f '
+                                 'luna://com.webos.service.tvpower/power/getPowerState "{}"', tty=True))
+        if power.get('state') != 'Active':
+            raise ValueError('TV must already be on for receiver upgrade')
+        tv.ssh(f'test -L /var/lib/webosbrew/init.d/10-airmouse-lg-receiver && '
+               f'test ! -e {stage} && umask 077 && mkdir {stage}')
+        files = {'lginput2.new': data, 'startup.py.new': (local / 'lg_receiver_startup.py').read_bytes(),
+                 'upgrade.py': (local / 'lg_receiver_upgrade.py').read_bytes()}
+        for name, contents in files.items():
+            tv.ssh(f'umask 077; cat > {stage}/{name} && chmod 700 {stage}/{name}', data=contents)
+        tv.ssh(f'/usr/bin/python3 -m py_compile {stage}/upgrade.py {stage}/startup.py.new')
+        for service in ('airmouse.service', 'airmouse-bluetooth.service'):
+            if remote.ssh(f'systemctl is-active {service} || true').strip() == 'active':
+                resume.insert(0, service)
+        remote.ssh('systemctl stop airmouse.service airmouse-bluetooth.service')
+        armed = True
+        print(tv.ssh(f'/usr/bin/python3 {stage}/upgrade.py activate'))
+        pid = tv.health()
+        tv.api('enableDualPairing', {'enable': True})
+        # Dual mode is ready before the secondary can reconnect.
+        if resume:
+            remote.ssh('systemctl start ' + ' '.join(resume))
+        time.sleep(8)
+        if tv.health() != pid:
+            raise ValueError('Receiver restarted during upgrade health check')
+        print(tv.ssh(f'/usr/bin/python3 {stage}/upgrade.py commit'))
+        armed = False
+        print('Deployed v5. TV power state retained. Test keys and pointer on both remotes.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if armed:
+            try:
+                remote.ssh('systemctl stop airmouse.service airmouse-bluetooth.service')
+                print(tv.ssh(f'/usr/bin/python3 {stage}/upgrade.py rollback'))
+            except (OSError, subprocess.SubprocessError):
+                print('Immediate rollback not confirmed; check the TV rollback timer.')
+        parser.exit(1, f'Receiver upgrade failed: {error}\n')
+    finally:
+        if resume:
+            remote.ssh('systemctl start ' + ' '.join(resume))
+
+
+if __name__ == '__main__':
+    main()

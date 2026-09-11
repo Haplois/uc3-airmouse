@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Compare simultaneous Remote 3 and LG motion recordings using signed axis rotations."""
+import argparse
+import collections
+import itertools
+import json
+import math
+import pathlib
+import statistics
+import struct
+
+
+def lg_samples(data, attribute):
+    if data[:8] != b'AMHCI1\0\0':
+        raise ValueError('Expected an Air mouse monitor capture')
+    offset, samples = 8, []
+    while offset + 12 <= len(data):
+        timestamp, length = struct.unpack_from('>QI', data, offset)
+        offset += 12
+        packet = data[offset:offset + length]
+        offset += length
+        if len(packet) != length:
+            break
+        if len(packet) < 17:
+            continue
+        opcode, adapter, size = struct.unpack_from('<HHH', packet)
+        if opcode != 5 or size != len(packet) - 6:
+            continue
+        handle, acl_length, l2cap_length, channel = struct.unpack_from('<HHHH', packet, 6)
+        if ((handle >> 12) & 3) == 1 or channel != 4 or acl_length != len(packet) - 10 or l2cap_length != len(packet) - 14:
+            continue
+        if packet[14] != 0x1b or struct.unpack_from('<H', packet, 15)[0] != attribute or len(packet) != 36:
+            continue
+        axes = struct.unpack_from('>hhhhhh', packet, 21)
+        samples.append({'wall_time': timestamp / 1e9, 'gyro': axes[:3], 'accel': axes[3:]})
+    return samples
+
+
+def bins(samples, period=0.05):
+    grouped = collections.defaultdict(list)
+    for sample in samples:
+        grouped[round(sample['wall_time'] / period)].append(sample)
+    return {key: {field: [statistics.fmean(sample[field][i] for sample in group) for i in range(3)]
+                  for field in ('gyro', 'accel')} for key, group in grouped.items()}
+
+
+def correlation(xs, ys):
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    xx = sum((x - mx) ** 2 for x in xs)
+    yy = sum((y - my) ** 2 for y in ys)
+    xy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return (xy / math.sqrt(xx * yy) if xx * yy > 1e-12 else 0,
+            xy / xx if xx > 1e-12 else 0, math.sqrt(xx / len(xs)))
+
+
+def align(sensor, lg):
+    remote_bins, lg_bins = bins(sensor), bins(lg)
+    candidates = []
+    for lag in range(-60, 61):
+        pairs = [(remote_bins[key], lg_bins[key + lag]) for key in remote_bins if key + lag in lg_bins]
+        pairs = [(a, b) for a, b in pairs if math.hypot(*a['gyro']) > 0.08 and math.hypot(*b['gyro']) > 70]
+        if len(pairs) < 20:
+            continue
+        matrix = [[correlation([a['gyro'][i] for a, b in pairs], [b['gyro'][j] for a, b in pairs])
+                   for i in range(3)] for j in range(3)]
+        for permutation in itertools.permutations(range(3)):
+            values = [matrix[j][permutation[j]] for j in range(3)]
+            signs = [1 if value[0] >= 0 else -1 for value in values]
+            inversions = sum(permutation[i] > permutation[j] for i in range(3) for j in range(i + 1, 3))
+            if math.prod(signs) * (-1) ** inversions != 1:
+                continue
+            candidates.append({'score': sum(abs(value[0]) for value in values) / 3,
+                               'lg_time_minus_remote3_seconds': lag * 0.05, 'bins': len(pairs),
+                               'source_axes': list(permutation), 'signs': signs,
+                               'gyro_correlation': [value[0] for value in values],
+                               'gyro_counts_per_rad_s': [value[1] for value in values],
+                               'source_gyro_std_rad_s': [value[2] for value in values]})
+    if not candidates:
+        raise ValueError('Need at least 20 overlapping bins with motion on both remotes')
+    candidates.sort(key=lambda value: value['score'], reverse=True)
+    best = candidates[0]
+    lag = round(best['lg_time_minus_remote3_seconds'] / 0.05)
+    pairs = [(remote_bins[key], lg_bins[key + lag]) for key in remote_bins if key + lag in lg_bins]
+    best['accel_correlation'] = [correlation([a['accel'][i] for a, b in pairs], [b['accel'][j] for a, b in pairs])[0]
+                                 for j, i in enumerate(best['source_axes'])]
+    best['all_axes_supported'] = min(abs(value) for value in best['gyro_correlation']) >= 0.85 and min(best['source_gyro_std_rad_s']) >= 0.05
+    return best
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sensor', required=True, type=pathlib.Path)
+    parser.add_argument('--monitor', required=True, type=pathlib.Path)
+    parser.add_argument('--motion-attribute', type=lambda value: int(value, 0), default=0x22)
+    parser.add_argument('--start-seconds', type=float, default=0, help='Start of an aligned movement interval relative to the sensor capture')
+    parser.add_argument('--duration-seconds', type=float, help='Analyze only this many seconds')
+    args = parser.parse_args()
+    try:
+        sensor = [json.loads(line) for line in args.sensor.read_text().splitlines() if line]
+        lg = lg_samples(args.monitor.read_bytes(), args.motion_attribute)
+        if not sensor or args.start_seconds < 0 or (args.duration_seconds is not None and args.duration_seconds <= 0):
+            raise ValueError('Expected sensor samples and a positive interval')
+        start = sensor[0]['wall_time'] + args.start_seconds
+        end = start + args.duration_seconds if args.duration_seconds is not None else math.inf
+        sensor = [sample for sample in sensor if start <= sample['wall_time'] < end]
+        lg = [sample for sample in lg if start - 3 <= sample['wall_time'] < end + 3]
+        print(json.dumps({'sensor_samples': len(sensor), 'lg_samples': len(lg), 'alignment': align(sensor, lg)}, indent=2))
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'Motion alignment failed: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

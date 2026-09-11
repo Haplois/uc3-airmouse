@@ -5,6 +5,13 @@ host is `root@10.0.10.51`; pass `--host user@address` for another device.
 
 ## Build and deploy
 
+The Node service build needs Python 3, Node.js 22.13 or newer, npm,
+`aarch64-linux-gnu-gcc`, and the Node and libuv development headers.
+`tools/airmouse-sensor-io-build` expects Node headers at `/usr/include/node`.
+Host sensor tests also need `cc`. Bluetooth and UI builds have additional
+requirements in the [Bluetooth guide](../bluetooth/README.md) and
+[native UI guide](../native/README.md).
+
 ```sh
 npm test
 tools/airmouse-deploy --accept-warranty
@@ -43,18 +50,22 @@ pauses pointing. Home shortcuts preserve whether pointing is enabled and resume
 after the new computer is ready. Off cancels the pending resume. Switching from
 the computer manager leaves pointing off.
 
+If the selected computer drops its Bluetooth link, press any key or shake the
+remote to make Remote 3 advertise again. With an LG TV, Power also sends the
+network wake packet. The status line reads "Reconnecting" while a request is
+recent.
+
 Home cycles through the first three quick-switch computers and preserves pointing
 state. Play, previous, next, volume, mute, and stop control the selected computer,
 including while pointing is paused. Computers that cache the old mouse-only HID
 descriptor may need to pair again before media controls become available.
 
-Display sleep never closes the app and keeps an enabled pointer running. On
-firmware 2.10.2, the remote does not sleep while pointing because the sensor's
-wake events count as activity. Pointing pauses on its own after 60 seconds
-without motion, set by `motion.idle_timeout_seconds`, and that pause lets the remote sleep. Low power and
-suspend interrupt Bluetooth and the sensor. If pointing was enabled when sleep
-began, the app stays open and shows "Paused for standby". Press Power to resume.
-If pointing was already paused, the app closes.
+The screen dims and switches off independently of owned Bluetooth pointing.
+LG mode rests after 15 seconds without movement and resumes on pickup or a
+pointer button. Computer mode pauses after `motion.idle_timeout_seconds`.
+Full suspend stops acquisition and the owned Bluetooth service; both restart
+after wake. An LG session keeps its page open and resumes automatically. See
+[power saving](power-saving.md) for settings, checks and connection timing.
 
 **Bluetooth ownership** in Settings decides when the service owns the stack.
 **Always** takes control at boot. **While open** takes control while the app is
@@ -118,9 +129,11 @@ it.
 
 `verify` checks that the native UI is installed, that the launcher button is the
 only Air mouse entity and sits on a page, that the control socket exists, and
-that no old Air mouse page items remain. The installed unit takes its sensor
-paths from the generated `airmouse.service.d/sensor.conf`; if that file does
-not match the discovered sensor, the service refuses to start.
+that no old Air mouse page items remain. The installed unit takes its IIO sensor
+path from the generated `airmouse.service.d/sensor.conf`. A udev rule gives the
+BMI323 wake input the stable `/dev/input/airmouse-wake` name because kernel event
+numbers can change across boots. The permission helper verifies that the symlink
+identifies the discovered BMI323 input before the service starts.
 
 `benchmark` compares Core HTTP and WebSocket entity-read latency. `link-check` reads Bluetooth
 connection metadata. During an owned takeover, use `tools/airmouse-bluetooth status` for daemon state. Core's

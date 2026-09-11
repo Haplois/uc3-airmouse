@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Test one Bluetooth power press followed by Wake-on-LAN on the paired lab TV."""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import time
+
+SEND = '''
+import fs from 'node:fs';
+import { HidOutput } from '/mnt/data/airmouse/current/runtime/hid-output.mjs';
+import { wakeOnLAN } from '/mnt/data/airmouse/current/runtime/lg-tv-power.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+const output = new HidOutput();
+output.start();
+try {
+  const deadline = performance.now() + 5000;
+  while (!output.deviceManagement && performance.now() < deadline) await delay(50);
+  const target = output.targets.find(t => t.id === output.selectedTarget);
+  const config = JSON.parse(fs.readFileSync('/mnt/data/airmouse/state/airmouse.json'));
+  const wake = config.lg_tv_power?.[target?.id];
+  if (!wake || !output.ready(target.id)) throw new Error('Select the configured LG TV while it is on');
+  try { await output.key(target.id, 'power'); console.log('Bluetooth power press sent'); }
+  catch (error) { console.log('Power delivery result: ' + error.message); }
+  await delay(12000);
+  await wakeOnLAN(wake);
+  console.log('Wake-on-LAN packet sent');
+} finally { output.close(); }
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True)
+    parser.add_argument('--remote', required=True)
+    args = parser.parse_args()
+    module = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv, remote = module['TV'](args.tv), module['TV'](args.remote)
+
+    def state():
+        try:
+            response = json.loads(tv.ssh('/usr/bin/luna-send -n 1 -w 1000 -f '
+                                        'luna://com.webos.service.tvpower/power/getPowerState "{}"', tty=True))
+            return response.get('state', 'Unknown')
+        except (ValueError, subprocess.SubprocessError):
+            return 'Unreachable'
+
+    stopped = False
+    try:
+        if state() != 'Active':
+            raise ValueError('Start the check while the TV is on')
+        remote.ssh('systemctl is-active airmouse.service')
+        stopped = True
+        remote.ssh('systemctl stop airmouse.service')
+        observations = []
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            sender = executor.submit(remote.ssh, 'node --input-type=module -', data=SEND.encode())
+            deadline = time.monotonic() + 35
+            while time.monotonic() < deadline:
+                current = state()
+                if not observations or observations[-1] != current:
+                    observations.append(current)
+                    print(json.dumps({'tv_power': current}), flush=True)
+                if sender.done():
+                    print(sender.result().strip(), flush=True)
+                    if current == 'Active':
+                        break
+                time.sleep(1)
+            sender.result()
+        if not any(value not in ('Active', 'Unknown', 'Unreachable') for value in observations) or observations[-1] != 'Active':
+            raise ValueError('A complete off/wake cycle was not confirmed')
+        print('TV left Active state and returned after the wake packet; no motion was injected.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Power check failed: {error}\n')
+    finally:
+        if stopped:
+            remote.ssh('systemctl start airmouse.service')
+
+
+if __name__ == '__main__':
+    main()

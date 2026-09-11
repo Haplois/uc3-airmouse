@@ -3,11 +3,41 @@
 A native Qt Quick app and Node.js service turn the Remote 3's motion sensor into
 a Bluetooth mouse. Computers use standard Bluetooth HID, with no companion app.
 
-Open **Living room → Air mouse** and press Power to start pointing. Slide the
-bottom strip right to scroll down or left to scroll up.
+LG TV mode adds air-mouse pointing, TV controls, and Netflix, YouTube, and
+Steam Machine shortcuts. The Steam Machine shortcut selects HDMI 1 and requests
+power-on over HDMI-CEC. See the [LG TV guide](docs/lg-tv.md) for setup and limits.
 
-With the app's own Bluetooth backend, OK holds the left mouse button and Right
-holds the right one until you let go, including while moving or scrolling. That
+## On the remote
+
+TV mode in all six themes, captured directly from a Remote 3 running
+`0.74.5-airmouse.31`:
+
+| Violet | Glacier | Mint |
+| --- | --- | --- |
+| <img src="docs/images/tv-violet.png" alt="LG TV mode in the Violet theme" width="200"> | <img src="docs/images/tv-glacier.png" alt="LG TV mode in the Glacier theme" width="200"> | <img src="docs/images/tv-mint.png" alt="LG TV mode in the Mint theme" width="200"> |
+
+| Amber | Graphite | True black |
+| --- | --- | --- |
+| <img src="docs/images/tv-amber.png" alt="LG TV mode in the Amber theme" width="200"> | <img src="docs/images/tv-graphite.png" alt="LG TV mode in the Graphite theme" width="200"> | <img src="docs/images/tv-black.png" alt="LG TV mode in the True black theme" width="200"> |
+
+Settings exposes theme, click order, and output controls. The calibration screen
+prompts you to place the remote on a flat surface before starting.
+
+| Settings | Calibration |
+| --- | --- |
+| <img src="docs/images/settings.png" alt="Air mouse settings in LG TV mode" width="240"> | <img src="docs/images/calibration.png" alt="Calibration screen prompting you to place the remote on a flat surface" width="240"> |
+
+These are unedited device screenshots. Capture another screen with
+`tools/airmouse-screenshot --output /tmp/remote.png`.
+
+## Use the air mouse
+
+For a computer, open **Living room → Air mouse** and press Power to start
+pointing. Slide the bottom strip right to scroll down or left to scroll up.
+
+With the app's own Bluetooth backend in computer mode, OK holds the left
+mouse button until you let go, including while moving or scrolling. Arrow keys
+send keyboard directions. Settings can swap the on-screen click-button order. That
 backend saves up to four computers and connects to one at a time. Open **All
 devices → Edit** to rename computers, drag them into order, or forget a bond.
 The first three are quick-switch buttons. A shortcut releases held buttons,
@@ -36,6 +66,7 @@ from the firmware service. Settings offers **Always**, **While open**, or
 restore the firmware service with the rollback command.
 
 - [Install and pair the owned Bluetooth backend](bluetooth/README.md)
+- [LG TV Bluetooth controls and limitations](docs/lg-tv.md)
 - [Bluetooth ownership and release behavior](docs/design/owned-bluetooth.md)
 - [Build and install the native UI](native/README.md)
 - [Operate and diagnose the service](docs/operations.md)

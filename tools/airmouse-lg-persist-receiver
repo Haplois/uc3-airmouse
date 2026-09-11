@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Persist the working receiver using the TV's installed webOSbrew startup hooks."""
+import argparse
+from pathlib import Path
+import runpy
+import shlex
+import subprocess
+
+ROOT = '/var/lib/webosbrew/airmouse-lg-receiver'
+HOOK = '/var/lib/webosbrew/init.d/10-airmouse-lg-receiver'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--disable', action='store_true',
+                        help='Disable startup restoration; keep the currently running receiver')
+    args = parser.parse_args()
+    deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv = deploy['TV'](args.host)
+    try:
+        if args.disable:
+            print(tv.ssh(f'test -d {ROOT} && touch {ROOT}/disabled'))
+            print('Startup restoration disabled. Current receiver continues until reboot.')
+            return
+        pid = tv.health()
+        tv.ssh(f'test -x /var/lib/webosbrew/startup.sh && '
+               f'test -d /var/lib/webosbrew/init.d && test ! -e {ROOT} && '
+               f'test ! -e {HOOK} && umask 077 && mkdir {ROOT}')
+        tv.ssh(f'cp /usr/sbin/lginput2 {ROOT}/lginput2 && chmod 700 {ROOT}/lginput2')
+        payload = Path(__file__).with_name('lib').joinpath('lg_receiver_startup.py').read_bytes()
+        tv.ssh(f'umask 077; cat > {ROOT}/startup.py', data=payload)
+        tv.ssh(f'/usr/bin/python3 -m py_compile {ROOT}/startup.py')
+        # Confirm local PTY-based API access before installing a boot hook.
+        tv.ssh('/usr/bin/python3 -c ' + shlex.quote(
+            f"import runpy; m=runpy.run_path('{ROOT}/startup.py'); "
+            "assert m['api']('getAPIVersion', {})['returnValue'] is True"))
+        print(tv.ssh(f'/usr/bin/python3 {ROOT}/startup.py boot'))
+        if tv.health() != pid:
+            raise ValueError('Receiver restarted during persistence installation')
+        hook = ('#!/bin/sh\nexec /usr/bin/python3 ' + ROOT + '/startup.py boot '
+                '>> ' + ROOT + '/startup.log 2>&1\n')
+        tv.ssh(f'umask 077; cat > {ROOT}/boot-hook; chmod 700 {ROOT}/boot-hook',
+               data=hook.encode())
+        tv.ssh(f'ln -s {ROOT}/boot-hook {HOOK} && sync')
+        print('Persistent startup hook installed. Receiver process and calibration retained; reboot not tested.')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Persistence installation failed: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

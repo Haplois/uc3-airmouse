@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Install the TV-side connection timing helper without restarting the receiver."""
+import argparse
+import json
+import re
+from pathlib import Path
+import runpy
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True, help='root@TV-host')
+    parser.add_argument('--disable', action='store_true')
+    args = parser.parse_args()
+    module = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
+    tv = module['TV'](args.host)
+    root = '/var/lib/webosbrew/airmouse-lg-receiver'
+    if args.disable:
+        tv.ssh(f'systemctl stop airmouse-lg-link.service && rm -f {root}/link.json '
+               '/run/systemd/system/airmouse-lg-link.service && systemctl daemon-reload')
+        print('Link helper disabled; TV default timing returns on the next connection.')
+        return
+    pid = tv.health()
+    config = json.loads(tv.ssh(f'cat {root}/power.json'))
+    address = config['bluetooth_address']
+    local = Path(__file__).with_name('lib')
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', address):
+        raise ValueError('Invalid configured Remote 3 address')
+    tv.ssh(f'test ! -e {root}/disabled && test -L /var/lib/webosbrew/init.d/10-airmouse-lg-receiver')
+    running = tv.ssh('systemctl is-active airmouse-lg-link.service || true').strip() == 'active'
+    files = {'link.py': (local / 'lg_link.py').read_bytes(),
+             'startup.py': (local / 'lg_receiver_startup.py').read_bytes(),
+             'link.json': json.dumps({'bluetooth_address': address.lower()}).encode()}
+    for name, contents in files.items():
+        tv.ssh(f'umask 077; cat > {root}/{name}.new && mv {root}/{name}.new {root}/{name}', data=contents)
+    tv.ssh(f'/usr/bin/python3 -m py_compile {root}/link.py {root}/startup.py')
+    print(tv.ssh(f'/usr/bin/python3 {root}/startup.py protect {address.lower()}'))
+    print(tv.ssh(f'/usr/bin/python3 {root}/startup.py boot'))
+    if running:
+        tv.ssh('systemctl restart airmouse-lg-link.service')
+    tv.ssh('systemctl is-active airmouse-lg-link.service')
+    if tv.health() != pid:
+        raise ValueError('Receiver restarted during installation')
+    tv.ssh('sync')
+    print('Persistent Remote 3 link helper installed; receiver process retained.')
+
+
+if __name__ == '__main__':
+    main()

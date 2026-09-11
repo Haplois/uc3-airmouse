@@ -14,9 +14,8 @@ Item {
     property real previousX: 0
     property bool opened: false
     property bool sleeping: false
-    // True while a sleep episode began with pointing enabled. The OFF sent for standby clears the
-    // controller's pointer flag, so later transitions in the same episode must not read it as
-    // "paused before sleep" and close the app.
+    property bool pointerSuspended: false
+    // Retain the session choice before standby's OFF clears pointer intent.
     property bool keepOpenWhileSleeping: false
     signal closed()
     function handleFocusLoss() {
@@ -24,16 +23,39 @@ Item {
             mousePage.closeInteractions(); mousePage.endScroll(); mousePage.releaseButtons(); airMouseBridge.command({type: "off"});
         }
     }
-    function open() { opened = true; navigation.takeControl(); airMouseBridge.open(); }
-    function close() { if (!opened) return; opened = false; mousePage.closeInteractions(); mousePage.endScroll(); mousePage.releaseButtons(); airMouseBridge.close(); navigation.releaseControl(); closed(); }
+    function open() {
+        opened = true;
+        navigation.takeControl();
+        airMouseBridge.open();
+    }
+    function resumeFromSleep() {
+        if (opened) {
+            navigation.takeControl();
+            airMouseBridge.reconnect();
+        }
+    }
+    function close() {
+        if (!opened) return;
+        opened = false;
+        mousePage.closeInteractions();
+        mousePage.endScroll();
+        mousePage.releaseButtons();
+        airMouseBridge.close();
+        navigation.releaseControl();
+        closed();
+    }
     Component.onDestruction: { mousePage.closeInteractions(); mousePage.releaseButtons(); airMouseBridge.close(); navigation.releaseControl(); }
-    AirMousePage { id: mousePage; anchors.fill: parent; bridge: airMouseBridge; batteryLevel: Battery.level; onExitRequested: host.close() }
+    AirMousePage {
+        id: mousePage; anchors.fill: parent; bridge: airMouseBridge; batteryLevel: Battery.level
+        pointerSessionActive: host.opened && !host.pointerSuspended && (ui.inputController.activeItem === host || host.sleeping && host.keepOpenWhileSleeping)
+        onExitRequested: host.close()
+    }
     Components.ButtonNavigation {
         id: navigation
         defaultConfig: ({
-            "BACK": { pressed: function() { mousePage.back(); }, pressed_repeat: function() {} },
-            "HOME": { pressed: function() { mousePage.nextDevice(); }, pressed_repeat: function() {} },
-            "POWER": { pressed: function() { mousePage.toggle(); }, pressed_repeat: function() {} },
+            "BACK": { pressed: function() { mousePage.remoteBack(); }, pressed_repeat: function() {} },
+            "HOME": { pressed: function() { mousePage.remoteHome(); }, pressed_repeat: function() {} },
+            "POWER": { pressed: function() { mousePage.remotePower(); }, pressed_repeat: function() {} },
             "PLAY": { pressed: function() { mousePage.media("play_pause"); }, pressed_repeat: function() {} },
             "PREV": { pressed: function() { mousePage.media("previous"); }, pressed_repeat: function() {} },
             "NEXT": { pressed: function() { mousePage.media("next"); }, pressed_repeat: function() {} },
@@ -41,6 +63,10 @@ Item {
             "VOLUME_UP": { pressed: function() { mousePage.media("volume_up"); }, pressed_repeat: function() { mousePage.media("volume_up"); } },
             "VOLUME_DOWN": { pressed: function() { mousePage.media("volume_down"); }, pressed_repeat: function() { mousePage.media("volume_down"); } },
             "STOP": { pressed: function() { mousePage.media("stop"); }, pressed_repeat: function() {} },
+            "RECORD": { pressed: function() { mousePage.tvSettings(false); }, pressed_repeat: function() {} },
+            "MENU": { pressed: function() { mousePage.tvSettings(true); }, pressed_repeat: function() {} },
+            "CHANNEL_UP": { pressed: function() { mousePage.tvInput(true); }, pressed_repeat: function() {} },
+            "CHANNEL_DOWN": { pressed: function() { mousePage.tvInput(false); }, pressed_repeat: function() {} },
             "DPAD_MIDDLE": { pressed: function() { mousePage.buttonPressed(1); }, released: function() { mousePage.buttonReleased(1); }, pressed_repeat: function() {} },
             "DPAD_UP": { pressed: function() { mousePage.direction("up"); }, pressed_repeat: function() { mousePage.direction("up"); } },
             "DPAD_DOWN": { pressed: function() { mousePage.direction("down"); }, pressed_repeat: function() { mousePage.direction("down"); } },
@@ -61,19 +87,18 @@ Item {
             Qt.callLater(host.handleFocusLoss);
         }
     }
-    // Power policy. Idle (display off) never closes the app and keeps an enabled pointer running,
-    // so the remote can be used without its screen; the service's own idle timeout still pauses a
-    // motionless pointer. Low power and suspend interrupt Bluetooth and sensor acquisition: they
-    // pause pointing and keep the app open when the sleep episode began with pointing enabled,
-    // and close a paused app otherwise.
+    // Display idle allows pointing; full suspend pauses it. The service handles motion rest.
     Connections {
         target: Power
         function onPowerModeChanged(fromMode, toMode) {
             var wasSleeping = host.sleeping;
+            var displayOnly = toMode === PowerModes.Idle ||
+                toMode === PowerModes.Low_power && mousePage.viewState.bluetooth_backend === "owned";
+            host.pointerSuspended = toMode !== PowerModes.Normal && !displayOnly;
             host.sleeping = toMode !== PowerModes.Normal;
             if (toMode === PowerModes.Normal) { host.keepOpenWhileSleeping = false; return; }
-            if (!wasSleeping) host.keepOpenWhileSleeping = mousePage.pointerEnabled;
-            if (toMode === PowerModes.Idle) { mousePage.endScroll(); mousePage.releaseButtons(); return; }
+            if (!wasSleeping) host.keepOpenWhileSleeping = mousePage.pointerEnabled || mousePage.lgTV && mousePage.screenPage === "mouse";
+            if (displayOnly) { mousePage.endScroll(); mousePage.releaseButtons(); return; }
             if (!host.keepOpenWhileSleeping) { host.close(); return; }
             mousePage.endScroll(); mousePage.releaseButtons();
             if (mousePage.pointerEnabled) airMouseBridge.command({type: "off", reason: "Paused for standby"});

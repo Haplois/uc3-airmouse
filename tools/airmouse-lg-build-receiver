@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Build and emulate an experimental slot repair for one reviewed LG receiver."""
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import runpy
+import struct
+
+STOCK_SHA256 = 'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b'
+HOOK = 0x62f92
+STUB = 0xb959c
+PADDING_END = 0xb9690
+DISPATCH_HOOK = 0x65b0c
+DISPATCH_STUB = 0xb95c0
+MOTION_HOOK = 0x52756
+MOTION_STUB = 0xb9600
+SHAKE_HOOK = 0x59876
+SHAKE_STUB = 0xb9640
+SCD_ROUTE_HOOK = 0x58190
+SCD_ROUTE_STUB = 0xb9664
+
+# Preserve the ABI and the original fallback. Only an already paired slot 1
+# with the receiver's dual switch enabled takes the existing common lookup.
+SOURCE = '''
+cmp r6, #1
+bne fallback
+push.w {r0-r3, r12, lr}
+bl #0x5dbf0
+cmp r0, #0
+pop.w {r0-r3, r12, lr}
+beq fallback
+b.w #0x62f46
+fallback:
+cmp r6, #0
+beq primary
+b.w #0x63074
+primary:
+b.w #0x62f96
+'''
+
+DISPATCH_SOURCE = '''
+cmp r4, #1
+bne fallback
+cmp.w r9, #0xfd
+bne fallback
+push.w {r0-r3, r12, lr}
+bl #0x5dbf0
+cmp r0, #0
+pop.w {r0-r3, r12, lr}
+beq fallback
+b.w #0x65c94
+fallback:
+bics r3, r4, #2
+b.w #0x65b10
+'''
+
+MOTION_SOURCE = '''
+cmp r3, #1
+bne fallback
+push.w {r0-r3, r12, lr}
+ldr r0, [r4, #8]
+cmp r0, #16
+bne restore_fallback
+bl #0x5dbf0
+cmp r0, #0
+pop.w {r0-r3, r12, lr}
+beq fallback
+b.w #0x52806
+restore_fallback:
+pop.w {r0-r3, r12, lr}
+fallback:
+cmp r3, #0
+beq primary
+b.w #0x5275a
+primary:
+b.w #0x52806
+'''
+
+# Only the second remote in dual mode uses a gentler recognition threshold.
+# The sensor samples and MotionEngine calibration never pass through this stub.
+SHAKE_SOURCE = '''
+ldr r3, [r0, #0x54]
+cmp r3, #1
+bne fallback
+push.w {r0-r3, r12, lr}
+bl #0x5dbf0
+cmp r0, #0
+pop.w {r0-r3, r12, lr}
+beq fallback
+movw r3, #375
+b resume
+fallback:
+ldr r3, [r0, #0x14]
+resume:
+ldr r1, [r1, #8]
+b.w #0x5987a
+'''
+
+# A newly attached secondary MR23 always carries its advertised SCD version,
+# which selects the remote-transfer path even when the TV already has a valid
+# address-specific calibration cache. Remote 3 does not expose the proprietary
+# factory-calibration transfer. Prefer that saved local cache for slot 1 only.
+SCD_ROUTE_SOURCE = '''
+ldr r0, [r4, #84]
+cmp r0, #1
+bne check
+push.w {r0-r3, r12, lr}
+bl #0x5dbf0
+cmp r0, #0
+pop.w {r0-r3, r12, lr}
+beq check
+mov.w r9, #0
+check:
+cmp.w r9, #0
+b.w #0x58194
+'''
+
+
+def build(data):
+    from elftools.elf.elffile import ELFFile
+    from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB
+
+    if hashlib.sha256(data).hexdigest() != STOCK_SHA256:
+        raise ValueError('Unreviewed firmware hash; refusing to build')
+    elf = ELFFile(io.BytesIO(data))
+    segment = elf.get_segment(3)
+    if (segment['p_type'], segment['p_offset'], segment['p_vaddr'],
+            segment['p_filesz'], segment['p_memsz'], segment['p_flags']) != (
+            'PT_LOAD', 0, 0, STUB, STUB, 5):
+        raise ValueError('Unexpected executable segment')
+    if any(data[STUB:PADDING_END]):
+        raise ValueError('Receiver padding is not empty')
+    assembler = Ks(KS_ARCH_ARM, KS_MODE_THUMB)
+    stub = bytes(assembler.asm(SOURCE, addr=STUB)[0])
+    branch = bytes(assembler.asm(f'b.w #{STUB}', addr=HOOK)[0])
+    dispatch_stub = bytes(assembler.asm(DISPATCH_SOURCE, addr=DISPATCH_STUB)[0])
+    dispatch_branch = bytes(assembler.asm(f'b.w #{DISPATCH_STUB}', addr=DISPATCH_HOOK)[0])
+    motion_stub = bytes(assembler.asm(MOTION_SOURCE, addr=MOTION_STUB)[0])
+    motion_branch = bytes(assembler.asm(f'b.w #{MOTION_STUB}', addr=MOTION_HOOK)[0])
+    shake_stub = bytes(assembler.asm(SHAKE_SOURCE, addr=SHAKE_STUB)[0])
+    shake_branch = bytes(assembler.asm(f'b.w #{SHAKE_STUB}', addr=SHAKE_HOOK)[0])
+    scd_route_stub = bytes(assembler.asm(SCD_ROUTE_SOURCE, addr=SCD_ROUTE_STUB)[0])
+    scd_route_branch = bytes(assembler.asm(
+        f'b.w #{SCD_ROUTE_STUB}', addr=SCD_ROUTE_HOOK)[0])
+    if len(branch) != 4 or len(stub) > 40 or STUB + len(stub) > PADDING_END:
+        raise ValueError('Unexpected assembled size')
+    if (STUB + len(stub) > DISPATCH_STUB or len(dispatch_stub) > 64
+            or len(dispatch_branch) != 4 or DISPATCH_STUB + len(dispatch_stub) > PADDING_END):
+        raise ValueError('Unexpected dispatcher repair size')
+    if (DISPATCH_STUB + len(dispatch_stub) > MOTION_STUB or len(motion_stub) > 96
+            or len(motion_branch) != 4 or MOTION_STUB + len(motion_stub) > PADDING_END):
+        raise ValueError('Unexpected motion initialization repair size')
+    if (MOTION_STUB + len(motion_stub) > SHAKE_STUB or len(shake_branch) != 4
+            or SHAKE_STUB + len(shake_stub) > PADDING_END):
+        raise ValueError('Unexpected shake threshold repair size')
+    if (SHAKE_STUB + len(shake_stub) > SCD_ROUTE_STUB or len(scd_route_branch) != 4
+            or SCD_ROUTE_STUB + len(scd_route_stub) > PADDING_END):
+        raise ValueError('Unexpected calibration route repair size')
+    patched = bytearray(data)
+    patched[HOOK:HOOK + 4] = branch
+    patched[STUB:STUB + len(stub)] = stub
+    patched[DISPATCH_HOOK:DISPATCH_HOOK + 4] = dispatch_branch
+    patched[DISPATCH_STUB:DISPATCH_STUB + len(dispatch_stub)] = dispatch_stub
+    patched[MOTION_HOOK:MOTION_HOOK + 4] = motion_branch
+    patched[MOTION_STUB:MOTION_STUB + len(motion_stub)] = motion_stub
+    patched[SHAKE_HOOK:SHAKE_HOOK + 4] = shake_branch
+    patched[SHAKE_STUB:SHAKE_STUB + len(shake_stub)] = shake_stub
+    patched[SCD_ROUTE_HOOK:SCD_ROUTE_HOOK + 4] = scd_route_branch
+    patched[SCD_ROUTE_STUB:SCD_ROUTE_STUB + len(scd_route_stub)] = scd_route_stub
+    # Grow the existing RX load segment into its unused alignment padding.
+    # No new writable executable memory, relocation, or entry point is added.
+    header = elf['e_phoff'] + 3 * elf['e_phentsize']
+    end = SCD_ROUTE_STUB + len(scd_route_stub)
+    struct.pack_into('<II', patched, header + 16, end, end)
+    return bytes(patched)
+
+
+def verify(stock, patched):
+    harness = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-check-slots')))
+    check = harness['check_slot']
+    rows = []
+    # Cover primary, secondary, accessory, unknown and out-of-range DB indices.
+    # Stock and patched execute the actual instructions with identical mock helpers.
+    for name in (*harness['CANDIDATES'], 'Unrecognized device'):
+        for slot in (0, 1, 2, 3, 11, 0xffffffff):
+            for enabled in (False, True):
+                before = check(stock, name, slot, dual_enabled=enabled)
+                after = check(patched, name, slot, dual_enabled=enabled)
+                if enabled and slot == 1 and name in harness['CANDIDATES']:
+                    if (after['selected_slot'] != 1 or not after['primary_preserved']
+                            or after['database_write_slots']):
+                        raise ValueError(f'Secondary slot was not preserved: {after}')
+                elif after != before:
+                    raise ValueError(f'Unexpected behavior change: {before} -> {after}')
+                rows.append(dict(after, dual_enabled=enabled))
+    return rows
+
+
+def verify_dispatcher(stock, patched):
+    check = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-check-dispatcher')))['dispatch']
+    count = 0
+    for slot in range(5):
+        for report in (*range(0xf7, 0xff), 0):
+            for dual in (False, True):
+                for blocked in (False, True):
+                    before = check(stock, slot, report, dual, blocked)
+                    after = check(patched, slot, report, dual, blocked)
+                    expected = before
+                    if slot == 1 and report == 0xfd and dual:
+                        expected = [] if blocked else [{'motion_report': 0xfd, 'slot': 1}]
+                    if after != expected:
+                        raise ValueError(f'Dispatch failed: {(slot, report, dual, blocked)}: {after}')
+                    count += 1
+    return count
+
+
+def verify_motion_init(stock, patched):
+    check = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-check-motion-init')))['initialize']
+    count = 0
+    for slot in range(5):
+        for device_type in range(21):
+            for dual in (False, True):
+                before = check(stock, slot, device_type, dual)
+                after = check(patched, slot, device_type, dual)
+                expected = before
+                if slot == 1 and device_type == 16 and dual:
+                    expected = {'parsed_calibration': True, 'handle': 1, 'year': 21, 'version': 2}
+                if after != expected:
+                    raise ValueError(f'Motion initialization failed: {(slot, device_type, dual)}: {after}')
+                count += 1
+    return count
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('original', type=Path)
+    parser.add_argument('output', type=Path)
+    args = parser.parse_args()
+    try:
+        original = args.original.read_bytes()
+        patched = build(original)
+        results = verify(original, patched)
+        dispatch_cases = verify_dispatcher(original, patched)
+        motion_cases = verify_motion_init(original, patched)
+        shake_check = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-check-shake')))
+        shake_cases = shake_check['verify'](original, patched)
+        scd_check = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-check-scd-route')))
+        scd_cases = scd_check['verify'](original, patched)
+        # Never overwrite the input or an existing build.
+        with args.output.open('xb') as output:
+            output.write(patched)
+        args.output.chmod(0o700)
+        print(json.dumps({
+            'original_sha256': STOCK_SHA256,
+            'patched_sha256': hashlib.sha256(patched).hexdigest(),
+            'cases_passed': len(results),
+            'dispatcher_cases_passed': dispatch_cases,
+            'motion_initialization_cases_passed': motion_cases,
+            'shake_cases_passed': len(shake_cases),
+            'calibration_route_cases_passed': len(scd_cases),
+            'limits': 'Mock DB/helpers; hardware keys, motion and reconnect remain untested',
+        }, indent=2))
+    except ImportError:
+        parser.exit(1, 'Install pyelftools, keystone-engine and unicorn in an analysis venv\n')
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'{error}\n')
+
+
+if __name__ == '__main__':
+    main()

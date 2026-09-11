@@ -78,7 +78,17 @@ Bluetooth name**.
 Only the selected encrypted identity can receive input. Advertising uses the
 controller's resolving list and Filter Accept List when privacy is supported. An
 application identity check also guards every report. Selection changes release
-buttons before disconnecting. Unrequested reconnection leaves pointing off. A
+buttons before disconnecting. Unrequested reconnection leaves pointing off.
+A peripheral cannot dial its host, so "reconnect" means advertising again and
+waiting. While the selected computer's link is down, any physical press or a
+shake of the remote sends `RECONNECT`, which restarts the fast advertising
+window. The shake comes from the sensor's wake input, watched only while
+nothing else owns the sensor. Requests are limited to one every three
+seconds, and while the app stays open the service repeats the request every
+30 seconds on its own, because the fast window after a wake or restart lasts
+30 seconds and a host that is asleep or busy during it would otherwise wait for
+the user. The daemon logs `LINK connected`, `LINK ready`, and
+`LINK disconnected` lines so a wake that never connects leaves evidence. A
 home shortcut can remember that pointing was enabled for up to three seconds.
 Node resumes only the selected ready computer and discards motion during the
 transition. Off, page closure, navigation, failure, or a newer switch
@@ -145,6 +155,7 @@ Each ASCII command ends with a newline and occupies at most 128 bytes.
 | `CANCEL_PAIR id` | Close pairing and restore selected-host advertising |
 | `SELECT id peer` | Select a saved computer and disconnect the previous link |
 | `DISCONNECT id` | Clear the selection and disconnect while retaining saved computers |
+| `RECONNECT id` | Restart the 20 ms advertising window for the selected computer; harmless while connected |
 | `KEY id usage` | Send one keyboard arrow press and release, even while pointing is paused |
 | `RENAME id peer hex` | Save UTF-8 name encoded as hex; `-` resets the custom name |
 | `REORDER id peers` | Save an exact comma-separated permutation of all peer IDs |

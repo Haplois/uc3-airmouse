@@ -59,9 +59,23 @@ if not args.skip_ui and not args.skip_build:
     step('package native ui', 'python3', tool('airmouse-ui'), 'package')
 
 if not args.skip_bluetooth:
-    if takeover_active:
-        step('bluetooth rollback', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'rollback')
-    step('bluetooth install', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'install', '--archive', bluetooth_archive)
+    # With ownership set to `always`, a running service re-takes Bluetooth seconds after a rollback,
+    # and install refuses while a takeover record exists. Hold the service down across both steps;
+    # the service deploy below starts the new release, which then applies the ownership setting.
+    remote('systemctl', 'stop', 'airmouse-bluetooth-request.path')
+    remote('systemctl', 'mask', '--runtime', 'airmouse-bluetooth-request.service')
+    try:
+        remote('systemctl', 'stop', 'airmouse.service')
+        if takeover_active:
+            step('bluetooth rollback', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'rollback')
+        # Rollback restores the service's previous running state.
+        remote('systemctl', 'stop', 'airmouse.service')
+        step('bluetooth install', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'install', '--archive', bluetooth_archive)
+    finally:
+        remote('systemctl', 'unmask', '--runtime', 'airmouse-bluetooth-request.service')
+        remote('systemctl', 'reset-failed', 'airmouse-bluetooth-request.service')
+        remote('systemctl', 'start', 'airmouse-bluetooth-request.path')
+        remote('systemctl', 'start', 'airmouse.service')
     if args.probe:
         step('bluetooth probe', 'python3', tool('airmouse-bluetooth'), '--host', args.host, 'probe')
 
