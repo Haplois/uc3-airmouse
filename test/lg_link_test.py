@@ -14,7 +14,7 @@ with patch.dict(sys.modules, {'startup': types.SimpleNamespace(
         api=None, ROOT=Path('/unused'), slots_valid=lambda: True)}):
     spec.loader.exec_module(module)
 
-PEER = 'e8:7c:c2:97:74:5a'
+PEER = '02:00:00:00:00:02'
 
 
 def event(code, data):
@@ -87,11 +87,12 @@ class LinkTest(unittest.TestCase):
             return {}
         with patch.object(module, 'api', api):
             module.reconnect_sleeping_remote(PEER)
-            self.assertEqual(calls[-1], ('hid/connect', {'address': PEER}))
-            for change in ({'paired': False}, {'blocked': True}, {'pairing': True}, {'connectedProfiles': ['hid']}):
+            self.assertEqual(calls[-1], ('gatt/connect', {'address': PEER}))
+            for change in ({'paired': False}, {'blocked': True}, {'pairing': True},
+                           {'connectedProfiles': ['hid']}, {'connectedProfiles': ['gatt']}):
                 before = dict(peer); peer.update(change); calls.clear()
                 module.reconnect_sleeping_remote(PEER)
-                self.assertNotIn('hid/connect', [method for method, _ in calls])
+                self.assertNotIn('gatt/connect', [method for method, _ in calls])
                 peer.clear(); peer.update(before)
             state['state'] = 'Active Standby'; calls.clear()
             module.reconnect_sleeping_remote(PEER)
@@ -109,13 +110,13 @@ class LinkTest(unittest.TestCase):
         self.assertIsNone(self.policy.request(30))
 
     def test_other_peer_and_unknown_handle_updates_never_trigger_commands(self):
-        self.policy.observe(connected('30:3f:5d:9d:a4:12'), 0)
+        self.policy.observe(connected('02:00:00:00:00:01'), 0)
         self.policy.observe(updated(), 1)
         self.assertIsNone(self.policy.request(20))
 
     def test_handle_reused_by_original_remote_clears_pending_update(self):
         self.policy.observe(connected(), 0)
-        self.policy.observe(connected('30:3f:5d:9d:a4:12'), 1)
+        self.policy.observe(connected('02:00:00:00:00:01'), 1)
         self.assertIsNone(self.policy.request(4))
 
     def test_disconnect_and_controller_reset_clear_identity(self):
@@ -140,7 +141,7 @@ class LinkTest(unittest.TestCase):
             self.policy.observe(packet[:length], 0)
         self.assertIsNone(self.policy.request(20))
 
-    def test_existing_link_is_refreshed_only_for_the_configured_paired_hid(self):
+    def test_existing_link_is_never_disconnected_at_helper_start(self):
         calls = []
         def api(method, body, **kwargs):
             calls.append((method, body))
@@ -149,7 +150,7 @@ class LinkTest(unittest.TestCase):
             return {'devices': [{'address': PEER, 'paired': True, 'connectedProfiles': ['hid']}]}
         with patch.object(module, 'api', api), patch.object(module, 'receive'), patch.object(module.time, 'sleep'):
             module.refresh_existing_link(None, self.policy, PEER)
-            self.assertEqual(calls[2:], [('hid/disconnect', {'address': PEER}), ('hid/connect', {'address': PEER})])
+            self.assertEqual(calls, [('device/getStatus', {})])
             calls.clear()
             self.policy.observe(connected(), 0)
             module.refresh_existing_link(None, self.policy, PEER)
@@ -164,7 +165,7 @@ class LinkTest(unittest.TestCase):
             return {'devices': [{'address': PEER, 'paired': True, 'connectedProfiles': ['hid']}]}
         with patch.object(module, 'api', api), patch.object(module, 'receive'):
             module.refresh_existing_link(None, self.policy, PEER)
-        self.assertEqual(calls, ['device/getStatus', 'power/getPowerState'])
+        self.assertEqual(calls, ['device/getStatus'])
 
     def test_raw_reports_without_a_receiver_binding_trigger_one_delayed_refresh(self):
         policy = module.AttachmentPolicy(grace=2)
@@ -208,7 +209,7 @@ class LinkTest(unittest.TestCase):
             device.mkdir(parents=True)
             (device / 'uevent').write_text('HID_UNIQ=' + PEER + '\n')
             self.assertTrue(module.receiver_has_hidraw(PEER, root / 'proc', root / 'hidraw'))
-            self.assertFalse(module.receiver_has_hidraw('30:3f:5d:9d:a4:12', root / 'proc', root / 'hidraw'))
+            self.assertFalse(module.receiver_has_hidraw('02:00:00:00:00:01', root / 'proc', root / 'hidraw'))
             (process / 'comm').write_text('unrelated\n')
             self.assertFalse(module.receiver_has_hidraw(PEER, root / 'proc', root / 'hidraw'))
 
@@ -232,7 +233,7 @@ class LinkTest(unittest.TestCase):
             (hidraw / 'hidraw1/device').mkdir(parents=True)
             (hidraw / 'hidraw1/device/uevent').write_text('HID_UNIQ=' + PEER + '\n')
             self.assertTrue(module.receiver_attached(PEER, info, hidraw))
-            self.assertFalse(module.receiver_attached('30:3f:5d:9d:a4:12', info, hidraw))
+            self.assertFalse(module.receiver_attached('02:00:00:00:00:01', info, hidraw))
 
     def test_attachment_repair_refreshes_only_the_connected_configured_remote(self):
         calls = []
@@ -242,10 +243,59 @@ class LinkTest(unittest.TestCase):
             if method == 'power/getPowerState': return {'state': 'Active'}
             if method == 'device/getStatus': return {'devices': [peer]}
             return {}
-        with patch.object(module, 'api', api), patch.object(module.time, 'sleep'):
-            self.assertTrue(module.repair_receiver_attachment(PEER))
-        self.assertEqual(calls[-2:], [('hid/disconnect', {'address': PEER}),
-                                     ('hid/connect', {'address': PEER})])
+        self.policy.observe(connected(), 0)
+        with patch.object(module, 'api', api):
+            self.assertTrue(module.repair_receiver_attachment(PEER, self.policy))
+        self.assertEqual(calls[-1], ('hid/disconnect', {'address': PEER}))
+        self.assertNotIn('gatt/connect', [method for method, _ in calls])
+        self.assertTrue(self.policy.disconnecting)
+        self.policy.observe(event(5, struct.pack('<BHB', 0, 512, 19)), 1.27)
+        self.assertFalse(self.policy.disconnecting)
+
+    def test_recovery_ignores_stale_handle_but_waits_for_requested_disconnect(self):
+        self.policy.observe(connected(), 0)
+        peer = {'address': PEER, 'paired': True, 'connectedProfiles': []}
+        def api(method, body, **kwargs):
+            return {'state': 'Active'} if method == 'power/getPowerState' else {'devices': [peer]}
+        with patch.object(module, 'api', side_effect=api) as call:
+            self.policy.disconnecting = True
+            module.reconnect_sleeping_remote(PEER, self.policy)
+            call.assert_not_called()
+            self.policy.disconnecting = False
+            module.reconnect_sleeping_remote(PEER, self.policy)
+            self.assertIsNone(self.policy.handle)
+            self.assertEqual(call.call_args.args[0], 'gatt/connect')
+
+    def test_failed_reconnects_retry_with_capped_backoff_and_log_errors(self):
+        recovery = module.ReconnectPolicy()
+        with patch.object(module, 'reconnect_sleeping_remote', side_effect=RuntimeError('offline')) as connect, \
+                patch('builtins.print') as log:
+            for now, due in ((0, 5), (5, 15), (15, 35), (35, 75), (75, 135), (135, 195)):
+                recovery.update(PEER, self.policy, now)
+                self.assertEqual(recovery.due, due)
+                count = connect.call_count
+                recovery.update(PEER, self.policy, due - .1)
+                self.assertEqual(connect.call_count, count)
+            self.assertEqual(log.call_count, 6)
+        with patch.object(module, 'reconnect_sleeping_remote') as connect:
+            recovery.update(PEER, self.policy, 195)
+            connect.assert_called_once_with(PEER, self.policy)
+            self.assertEqual(recovery.delay, 5)
+
+    def test_delayed_disconnect_completion_controls_reconnect_not_elapsed_sleep(self):
+        self.policy.observe(connected(), 0)
+        self.policy.disconnecting = True
+        peer = {'address': PEER, 'paired': True, 'connectedProfiles': []}
+        def api(method, body, **kwargs):
+            return {'state': 'Active'} if method == 'power/getPowerState' else {'devices': [peer]}
+        recovery = module.ReconnectPolicy()
+        with patch.object(module, 'api', side_effect=api) as call:
+            for now in (1, 6, 11):
+                recovery.update(PEER, self.policy, now)
+            call.assert_not_called()
+            self.policy.observe(event(5, struct.pack('<BHB', 0, 512, 19)), 12)
+            recovery.update(PEER, self.policy, 16)
+            self.assertEqual(call.call_args.args[0], 'gatt/connect')
 
     def test_invalid_slot_identities_block_all_reconnect_operations(self):
         calls = []

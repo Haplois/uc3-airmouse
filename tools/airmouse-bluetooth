@@ -15,7 +15,7 @@ BASE = '/mnt/data/airmouse/bluetooth'
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='root@10.0.10.51')
+    parser.add_argument('--host', default='root@remote3.example')
     parser.add_argument('command', choices=['install', 'probe', 'takeover', 'rollback', 'status', 'recover-subscriptions'])
     parser.add_argument('--archive', type=pathlib.Path, help='ARM64 bundle from airmouse-bluetooth-build')
     parser.add_argument('--backup', help='On-device bonds.tlv backup for subscription recovery')

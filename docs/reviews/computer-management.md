@@ -81,4 +81,4 @@ unmeasured.
 
 Design comparisons, rendered screens, builds, and verification logs are archived
 outside the repository at
-`/home/agent/.codex/archives/uc3-airmouse/computer-management-20260908/`.
+`<private-archive>/computer-management-20260908/`.

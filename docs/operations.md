@@ -1,7 +1,9 @@
 # Operate the Air mouse service
 
-Tools that access the remote use your existing SSH authorization. The default
-host is `root@10.0.10.51`; pass `--host user@address` for another device.
+Tools that access the remote use your existing SSH authorization. Defaults such
+as `root@remote3.example` and `root@lg-tv.example` are placeholders, not device
+discovery. Pass `--host user@address` with your actual SSH destination. Tools
+with separate `--tv` and `--remote` flags require both destinations explicitly.
 
 ## Build and deploy
 

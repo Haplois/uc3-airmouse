@@ -10,6 +10,10 @@ The [extracted receiver map](../test/fixtures/lg-receiver-protocol.json) retains
 table entries, function addresses, and instruction checks without distributing
 LG executables, Bluetooth keys, or factory calibration data.
 
+Command examples use placeholder hostnames. Set `REMOTE3_ADDRESS` and
+`ORIGINAL_REMOTE_ADDRESS` to your paired devices' Bluetooth addresses before
+using the identity-scoped tools. Literal example addresses are synthetic.
+
 ## Evidence and reproduction
 
 The inspected `lginput2` SHA-256 is
@@ -208,8 +212,8 @@ To upgrade an existing persistent v4 installation while the TV is already on:
 
 ```sh
 python tools/airmouse-lg-build-receiver /private/path/lginput2 /private/path/lginput2-v5
-python tools/airmouse-lg-upgrade-receiver --host root@10.0.240.2 \
-    --remote-host root@10.0.10.51 --binary /private/path/lginput2-v5
+python tools/airmouse-lg-upgrade-receiver --host root@lg-tv.example \
+    --remote-host root@remote3.example --binary /private/path/lginput2-v5
 ```
 
 The upgrader saves the prior receiver and startup helper, arms a two-minute
@@ -241,7 +245,7 @@ from the running process. It reports the last loaded calibration, not measured
 Bluetooth delivery. It does not wake the TV or modify process memory.
 
 ```sh
-python3 tools/airmouse-lg-check-motion-rate --host root@10.0.240.2
+python3 tools/airmouse-lg-check-motion-rate --host root@lg-tv.example
 ```
 
 Before the connection timing fix, Remote 3 reported a 20 ms Bluetooth connection
@@ -269,19 +273,44 @@ The HCI command and socket formats follow the
 
 The helper reads HCI event packets and Remote 3's hidraw reports. It uses the
 reports only to detect activity and does not log or save their payloads or keys.
-If it starts after Remote 3 has already connected, it refreshes that paired HID
-connection once through the TV's normal disconnect/connect APIs to observe a
-fresh handle while the TV is active. It does not refresh the connection during
-standby or a power transition. If raw reports arrive while the receiver has no
+If it starts after Remote 3 has already connected, it retains that connection
+and waits for the next connection event to discover timing. It does not refresh
+the connection during standby or a power transition. If raw reports arrive while the receiver has no
 matching slot-1 hidraw attachment, it waits two seconds and refreshes only Remote
 3. This repairs the connection order where Remote 3 attaches first and the
 original remote attaches later. It never guesses or persists connection handles. It runs as
 `airmouse-lg-link.service` through the existing receiver startup hook.
 
+Attachment repair waits for the matching disconnect-complete event before
+reconnection. Recovery uses `gatt/connect`, which restores HID on the paired
+Remote 3. Failed requests retry with a delay that increases from 5 to at most
+60 seconds and print an error. Periodic checks consult the TV's profile state
+even when the helper holds an old connection handle.
+
+On September 13, the previous startup refresh removed the background connection
+registration. Its fixed one-second delay requested reconnection before the TV
+finished disconnecting. The TV rejected that request, and subsequent HID-only
+requests failed. A GATT request restored the connection without re-pairing.
+The updated helper passed TV and Remote 3 reboot checks, recovering in 56 and
+49 seconds respectively, with both pairings and the installed helper intact.
+These checks verify connectivity, not physical key presses or cursor motion.
+
+Use [`airmouse-lg-check-reconnect`](../tools/airmouse-lg-check-reconnect) to
+repeat either reboot check without sending a manual reconnect command:
+
 ```sh
-python3 tools/airmouse-lg-install-link --host root@10.0.240.2
-python3 tools/airmouse-lg-check-link --tv root@10.0.240.2 \
-    --remote root@10.0.10.51 --address e8:7c:c2:97:74:5a --reconnect
+python3 tools/airmouse-lg-check-reconnect --tv root@lg-tv.example --remote root@remote3.example --reboot tv
+python3 tools/airmouse-lg-check-reconnect --tv root@lg-tv.example --remote root@remote3.example --reboot remote
+```
+
+The checker accepts a reset uptime because this TV retains its boot ID after
+restart. It checks the selected Bluetooth target independently of the app's
+UI-control connection, since the app is closed after a Remote 3 reboot.
+
+```sh
+python3 tools/airmouse-lg-install-link --host root@lg-tv.example
+python3 tools/airmouse-lg-check-link --tv root@lg-tv.example \
+    --remote root@remote3.example --address 02:00:00:00:00:02 --reconnect
 ```
 
 The installation retained the receiver process. The fresh-connection hardware
@@ -299,7 +328,7 @@ startup failure. The TV was returned to `Active Standby` after testing.
 Disable the helper and restore default timing on the next connection with:
 
 ```sh
-python3 tools/airmouse-lg-install-link --host root@10.0.240.2 --disable
+python3 tools/airmouse-lg-install-link --host root@lg-tv.example --disable
 ```
 
 ## Dual pairing verification and failed hardware test
@@ -441,8 +470,8 @@ calibration-route check covers 20. The full build covers 610 cases.
 ```sh
 python tools/airmouse-lg-build-receiver /private/path/lginput2 \
     /private/path/lginput2-v5
-python tools/airmouse-lg-deploy-receiver --host root@10.0.240.2 \
-    --binary /private/path/lginput2-v5
+python tools/airmouse-lg-deploy-receiver --host root@lg-tv.example \
+    --binary /private/path/lginput2-v5 --remote3-address "$REMOTE3_ADDRESS"
 ```
 
 The build requires `pyelftools`, `keystone-engine`, and `unicorn`. Neither the
@@ -470,7 +499,7 @@ unpaired. The setup required a pairing reset and registration of the original
 remote in the primary slot. After that registration, enable the second slot:
 
 ```sh
-python tools/airmouse-lg-deploy-receiver --host root@10.0.240.2 --enable-dual
+python tools/airmouse-lg-deploy-receiver --host root@lg-tv.example --enable-dual
 ```
 
 Then use **Pair LG TV** on Remote 3 and test keys and pointer on each remote.
@@ -480,7 +509,7 @@ On September 8, the user confirmed that both remotes worked correctly with v3.
 Roll back without rebooting:
 
 ```sh
-python tools/airmouse-lg-deploy-receiver --host root@10.0.240.2 --rollback
+python tools/airmouse-lg-deploy-receiver --host root@lg-tv.example --rollback
 ```
 
 The deployment keeps a private copy of the pre-deployment receiver state under
@@ -514,7 +543,7 @@ webOSbrew startup installation and a healthy v5 receiver. It does not modify
 system firmware, pairing records, or calibration files.
 
 ```sh
-python3 tools/airmouse-lg-persist-receiver --host root@10.0.240.2
+python3 tools/airmouse-lg-persist-receiver --host root@lg-tv.example
 ```
 
 The hook recreates two runtime systemd drop-ins. The receiver's pre-start step
@@ -540,7 +569,7 @@ both remotes after the first full reboot. Startup output is saved in
 Disable restoration on future boots without interrupting the current receiver:
 
 ```sh
-python3 tools/airmouse-lg-persist-receiver --host root@10.0.240.2 --disable
+python3 tools/airmouse-lg-persist-receiver --host root@lg-tv.example --disable
 ```
 
 For an immediate rollback, run `/usr/bin/python3
@@ -579,8 +608,8 @@ The test changes the TV's focused selection if the keys work. Concurrent use of
 the original remote can add extra events, so keep it idle during the check.
 
 ```sh
-python tools/airmouse-lg-check-key-route --tv root@10.0.240.2 \
-    --remote root@10.0.10.51
+python tools/airmouse-lg-check-key-route --tv root@lg-tv.example \
+    --remote root@remote3.example --remote3-address "$REMOTE3_ADDRESS"
 ```
 
 After pairing again, the second build produced all four key presses and releases
@@ -643,7 +672,8 @@ temporary backup, then restarts the receiver with dual mode off. Other Bluetooth
 bonds and the shared calibration archive remain intact.
 
 ```sh
-python tools/airmouse-lg-clear-pairings --host root@10.0.240.2
+python tools/airmouse-lg-clear-pairings --host root@lg-tv.example \
+    --original-address "$ORIGINAL_REMOTE_ADDRESS" --remote3-address "$REMOTE3_ADDRESS"
 ```
 
 During diagnosis, this reset cleared both registration slots and their TV-side

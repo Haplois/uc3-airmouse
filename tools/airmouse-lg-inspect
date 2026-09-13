@@ -195,7 +195,7 @@ def summarize_motion_sessions(data, peer, motion_attribute, command_attribute):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='root@10.0.240.2')
+    parser.add_argument('--host', default='root@lg-tv.example')
     captures = parser.add_mutually_exclusive_group()
     captures.add_argument('--snoop', type=pathlib.Path, help='Analyze a saved btsnoop capture instead of SSH')
     captures.add_argument('--monitor', type=pathlib.Path, help='Analyze an airmouse-lg-record capture instead of SSH')

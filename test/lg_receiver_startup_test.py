@@ -39,7 +39,7 @@ class StartupTest(unittest.TestCase):
             return self.module.PATCHED
         return self.real_digest(path)
 
-    def slots(self, primary='30:3f:5d:9d:a4:12', secondary='e8:7c:c2:97:74:5a'):
+    def slots(self, primary='02:00:00:00:00:01', secondary='02:00:00:00:00:02'):
         for number, address in ((1, primary), (2, secondary)):
             (self.module.MRCU / f'mrcu{number}.info').write_text(
                 f'Name = LGE MR23\nBDAddr = {address}\nhidraw = /dev/hidraw{number}\n')
@@ -148,7 +148,7 @@ class StartupTest(unittest.TestCase):
         self.assertEqual(self.current, self.module.PATCHED)
 
     def test_protected_slots_restore_primary_identity_and_calibration_on_cold_boot(self):
-        primary, secondary = '30:3f:5d:9d:a4:12', 'e8:7c:c2:97:74:5a'
+        primary, secondary = '02:00:00:00:00:01', '02:00:00:00:00:02'
         self.slots(primary, secondary)
         self.module.protect(secondary)
         saved = self.module.ROOT / 'slots'
@@ -160,13 +160,13 @@ class StartupTest(unittest.TestCase):
         self.assertTrue(self.module.slots_valid())
 
     def test_slot_protection_rejects_a_duplicate_primary(self):
-        secondary = 'e8:7c:c2:97:74:5a'
+        secondary = '02:00:00:00:00:02'
         self.slots(secondary, secondary)
         with self.assertRaisesRegex(RuntimeError, 'original remote'):
             self.module.protect(secondary)
 
     def test_protected_slot_checksum_tampering_is_rejected(self):
-        secondary = 'e8:7c:c2:97:74:5a'
+        secondary = '02:00:00:00:00:02'
         self.slots(secondary=secondary)
         self.module.protect(secondary)
         (self.module.ROOT / 'slots/mrcu1.info').write_text('tampered\n')

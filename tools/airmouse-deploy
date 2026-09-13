@@ -15,7 +15,7 @@ import sys
 
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--host', default='root@remote3.example')
 parser.add_argument('--skip-build', action='store_true', help='Use the archives already in dist/')
 parser.add_argument('--skip-bluetooth', action='store_true', help='Leave the installed Bluetooth daemon alone')
 parser.add_argument('--skip-ui', action='store_true', help='Leave the installed native UI alone')

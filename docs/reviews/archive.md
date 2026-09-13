@@ -1,8 +1,11 @@
 # Archived design and review evidence
 
+`<private-archive>` denotes the maintainer's external archive directory.
+The public notes retain artifact names but omit the workstation's absolute path.
+
 The pre-cleanup repository files are preserved in:
 
-`/home/agent/.codex/archives/uc3-airmouse/before-fable-cleanup-20260907-154653.tar.gz`
+`<private-archive>/before-fable-cleanup-20260907-154653.tar.gz`
 
 The archive retains the complete `docs/reviews/2026-09-07/` tree, including `reliability-validation.json`, `reliability-tests.txt`, prompts, reviewer
 responses, prototype screenshots, and historical defect checks. The evidence
@@ -12,12 +15,12 @@ The original approved HTML design is also on branch
 `prototype/airmouse-dock-approved-2026-09-07`, commit
 `9d73b5421bbabe51bde4f62c98a2dee01a63520b`. Later visual adjustments are included
 in the backup archive. At cleanup time the browser preview was served from
-`/home/agent/.codex/archives/uc3-airmouse/current-ui-prototype/`.
+`<private-archive>/current-ui-prototype/`.
 
 The Fable review, physical screenshot, native Qt renders, and validation logs
 are stored at:
 
-`/home/agent/.codex/archives/uc3-airmouse/fable-native-cleanup-20260907/`
+`<private-archive>/fable-native-cleanup-20260907/`
 
 These are external archives on the shared workstation, not files distributed by
 this repository. Copy them separately if moving the project. Cleanup created no
@@ -27,7 +30,7 @@ archive commit and left the Git index unchanged.
 
 The generated-file archive is:
 
-`/home/agent/.codex/archives/uc3-airmouse/cleanup-20260911/`
+`<private-archive>/cleanup-20260911/`
 
 It contains 42 superseded build bundles and 38 Python bytecode files,
 totalling 12,416,720 bytes. Paths within the archive match their repository

@@ -72,7 +72,7 @@ The daemon binary SHA-256 is
 `9996bdc256390eb73515fff1b612da9218a1431e38b9cc6d16934f61120acb58`.
 Design responses, hardware evidence, build logs, and device verification are
 archived outside the repo at
-`/home/agent/.codex/archives/uc3-airmouse/owned-bluetooth-20260908/`.
+`<private-archive>/owned-bluetooth-20260908/`.
 
 ## Manual checks remaining at this release
 

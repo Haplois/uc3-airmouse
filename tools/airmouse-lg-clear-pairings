@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Clear lab Magic Remote bonds and receiver slots, retaining other Bluetooth devices."""
+"""Clear explicitly selected Magic Remote bonds, retaining other Bluetooth devices."""
 import argparse
 import json
 from pathlib import Path
 import runpy
 import shlex
 import subprocess
-
-REMOTES = ('30:3f:5d:9d:a4:12', 'e8:7c:c2:97:74:5a')
-ORIGINAL, REMOTE3 = REMOTES
+from lib.device_identity import bluetooth_address
 
 
 def bluetooth(tv, method, payload):
@@ -23,20 +21,25 @@ def bluetooth(tv, method, payload):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True, help='root@lab-TV-host')
+    parser.add_argument('--original-address', required=True, type=bluetooth_address)
+    parser.add_argument('--remote3-address', required=True, type=bluetooth_address)
     parser.add_argument('--remote3-only', action='store_true',
                         help='Clear only Remote 3 and the secondary receiver slot')
     args = parser.parse_args()
+    if args.original_address == args.remote3_address:
+        parser.error('Original remote and Remote 3 must have different addresses')
+    original, remote3 = args.original_address, args.remote3_address
     try:
         deploy = runpy.run_path(str(Path(__file__).with_name('airmouse-lg-deploy-receiver')))
         tv = deploy['TV'](args.host)
         digest = tv.ssh('sha256sum /usr/sbin/lginput2').split()[0]
         if digest not in (deploy['STOCK_SHA256'], deploy['PREVIOUS_SHA256'], deploy['PATCHED_SHA256']):
             raise ValueError('Unreviewed TV receiver')
-        targets = {REMOTE3} if args.remote3_only else set(REMOTES)
+        targets = {remote3} if args.remote3_only else {original, remote3}
         tv.api('enableDualPairing', {'enable': False})
         before = bluetooth(tv, 'device/getStatus', {}).get('devices', [])
         paired_before = {d['address'].lower() for d in before if d.get('paired')}
-        if args.remote3_only and (ORIGINAL not in paired_before or tv.api('isPaired', {}).get('isPaired') is not True):
+        if args.remote3_only and (original not in paired_before or tv.api('isPaired', {}).get('isPaired') is not True):
             raise ValueError('Original LG remote is not in the primary slot')
         others = paired_before - targets
         for device in before:

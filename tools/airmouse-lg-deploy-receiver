@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import time
+from lib.device_identity import bluetooth_address
 
 STOCK_SHA256 = 'c58d4f06179944944c475e47bd0b6d9f1be1a4e032d8dc6562642d2ffdbd870b'
 PREVIOUS_SHA256 = '971bc4fce21529adcdf194f9226aa3bfa44ad0d4ad462ab4902112aeca360b70'
@@ -91,12 +92,16 @@ class TV:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True, help='root@TV-host, not the Remote 3')
+    parser.add_argument('--remote3-address', type=bluetooth_address,
+                        help='Required with --binary to guard against an early reconnect')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--binary', type=Path)
     mode.add_argument('--rollback', action='store_true')
     mode.add_argument('--enable-dual', action='store_true',
                       help='Enable the second slot after the original remote registers in the first')
     args = parser.parse_args()
+    if args.binary and not args.remote3_address:
+        parser.error('--binary requires --remote3-address')
     activated = False
     tv = None
     try:
@@ -120,7 +125,7 @@ def main():
                                  'luna://com.webos.service.bluetooth2/device/getStatus "{}"', tty=True))
         if status.get('returnValue') is not True:
             raise ValueError('Cannot check TV Bluetooth connections')
-        if any(device.get('address') == 'e8:7c:c2:97:74:5a' and device.get('connectedProfiles')
+        if any(device.get('address', '').lower() == args.remote3_address and device.get('connectedProfiles')
                for device in status.get('devices', [])):
             raise ValueError('Stop Remote 3 Bluetooth during receiver deployment to prevent an early secondary reconnect')
         # Refuse to overwrite an active or previous trial and its private backup.

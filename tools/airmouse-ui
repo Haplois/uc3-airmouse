@@ -13,7 +13,7 @@ import tarfile
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('command', choices=['package', 'stage', 'status', 'install', 'rollback'])
-parser.add_argument('--host', default='root@10.0.10.51')
+parser.add_argument('--host', default='root@remote3.example')
 parser.add_argument('--accept-warranty', action='store_true', help='Explicitly accept the Core installer’s irreversible warranty consent record')
 args = parser.parse_args()
 if not re.fullmatch(r'[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):

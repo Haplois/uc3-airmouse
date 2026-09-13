@@ -58,7 +58,7 @@ if [ "$found" -ne 1 ]; then exit 2; fi
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="root@10.0.10.51", help="SSH destination")
+    parser.add_argument("--host", default="root@remote3.example", help="SSH destination")
     args = parser.parse_args()
     if args.host.startswith("-") or any(c.isspace() for c in args.host):
         parser.error("host must be a single SSH destination, not an option")

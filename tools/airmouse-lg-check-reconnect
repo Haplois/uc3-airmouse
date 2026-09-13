@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Reboot one device and verify automatic recovery without sending reconnect commands."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import shlex
+import subprocess
+import time
+
+
+TV_CHECK = '''import sys,json
+sys.path.insert(0, '/var/lib/webosbrew/airmouse-lg-receiver')
+import startup
+assert startup.slots_valid(), 'Protected slots changed'
+c=json.loads((startup.ROOT/'slots.json').read_text())
+devices=startup.api('device/getStatus', {}, service='com.webos.service.bluetooth2')['devices']
+for slot in ('primary_address', 'secondary_address'):
+    peer=next(d for d in devices if d.get('address','').lower()==c[slot].lower())
+    assert peer.get('paired') is True, slot + ' is not paired'
+    if slot=='secondary_address':
+        assert 'hid' in peer.get('connectedProfiles', []), 'Remote HID not connected'
+print('Both pairings intact; remote HID connected')
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tv', required=True)
+    parser.add_argument('--remote', required=True)
+    parser.add_argument('--reboot', required=True, choices=('tv', 'remote'))
+    args = parser.parse_args()
+    tools = Path(__file__).parent
+    device = runpy.run_path(str(tools / 'airmouse-lg-deploy-receiver'))['TV']
+    tv, remote = device(args.tv), device(args.remote)
+    target = tv if args.reboot == 'tv' else remote
+    expected = hashlib.sha256((tools / 'lib/lg_link.py').read_bytes()).hexdigest()
+
+    def health():
+        tv.health()
+        tv.ssh('systemctl is-active airmouse-lg-link.service bthidmanager.service')
+        actual = tv.ssh('sha256sum /var/lib/webosbrew/airmouse-lg-receiver/link.py').split()[0]
+        assert actual == expected, 'Installed link helper differs from tested source'
+        tv.ssh('/usr/bin/python3 -c ' + shlex.quote(TV_CHECK))
+        remote.ssh('systemctl is-active airmouse.service airmouse-bluetooth.service')
+        status = json.loads(remote.ssh('cat /mnt/data/airmouse/state/status.json'))
+        selected = next(t for t in status.get('targets', []) if t.get('id') == status.get('target'))
+        assert selected.get('ready') is True and selected.get('connected') is True, 'Remote target not ready'
+        assert status.get('core_connected') is True and not status.get('error'), 'Remote runtime unhealthy'
+        assert status.get('target_profile') == 'lg-tv', 'Remote target is not TV'
+
+    health()
+    before = target.ssh('cat /proc/sys/kernel/random/boot_id').strip()
+    uptime_before = float(target.ssh('cat /proc/uptime').split()[0])
+    print('Baseline passed; rebooting ' + args.reboot, flush=True)
+    started = time.monotonic()
+    try:
+        target.ssh('systemctl reboot')
+    except subprocess.CalledProcessError:
+        pass
+    deadline = started + 240
+    last_error = 'No changed boot ID observed'
+    while time.monotonic() < deadline:
+        try:
+            after = target.ssh('cat /proc/sys/kernel/random/boot_id').strip()
+            uptime_after = float(target.ssh('cat /proc/uptime').split()[0])
+            assert after and (after != before or uptime_after < uptime_before), 'Waiting for new boot'
+            health()
+            print('Recovered after {:.1f}s; checking stability for 20s'.format(
+                time.monotonic() - started), flush=True)
+            break
+        except (AssertionError, OSError, ValueError, StopIteration, subprocess.SubprocessError) as error:
+            last_error = str(error) if isinstance(error, AssertionError) else type(error).__name__
+        time.sleep(3)
+    else:
+        raise RuntimeError('Reboot recovery failed: ' + last_error)
+    for _ in range(4):
+        time.sleep(5)
+        health()
+    print('PASS: {} reboot, automatic HID/runtime recovery, helper persistence, both pairings, stability'.format(
+        args.reboot), flush=True)
+
+
+if __name__ == '__main__':
+    main()

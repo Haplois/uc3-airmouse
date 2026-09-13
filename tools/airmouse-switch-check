@@ -28,7 +28,7 @@ finally{if(!closed&&state&&state.target!==before.target)try{await select(before.
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='root@10.0.10.51')
+    parser.add_argument('--host', default='root@remote3.example')
     args = parser.parse_args()
     if not re.fullmatch(r'root@[A-Za-z0-9][A-Za-z0-9.-]*', args.host):
         parser.error('Expected root@host')

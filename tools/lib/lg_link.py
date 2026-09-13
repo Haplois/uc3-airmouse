@@ -21,6 +21,7 @@ class LinkPolicy:
 
     def clear(self):
         self.handle = None
+        self.disconnecting = False
         self.interval = self.latency = None
         self.timeout = 300
         self.due = None
@@ -303,18 +304,12 @@ def refresh_existing_link(controller, policy, address):
     existing = next((d for d in devices if d.get('address', '').lower() == address
                      and d.get('paired') is True and 'hid' in d.get('connectedProfiles', [])), None)
     if existing and policy.handle is None:
-        state = api('power/getPowerState', {}, service='com.webos.service.tvpower')
-        if state.get('state') != 'Active' or state.get('processing'):
-            return
-        # The socket may start after an existing connection. Reconnect that peer
-        # through the normal HID service instead of guessing or saving HCI handles.
-        api('hid/disconnect', {'address': address}, service='com.webos.service.bluetooth2')
-        time.sleep(1)
-        api('hid/connect', {'address': address}, service='com.webos.service.bluetooth2')
-        print('Remote 3 existing link refreshed', flush=True)
+        print('Remote 3 existing link retained; timing discovery waits for the next connection', flush=True)
 
 
-def reconnect_sleeping_remote(address):
+def reconnect_sleeping_remote(address, policy=None):
+    if policy is not None and policy.disconnecting:
+        return
     if not slot_identities_valid(address):
         return
     state = api('power/getPowerState', {}, service='com.webos.service.tvpower')
@@ -324,11 +319,36 @@ def reconnect_sleeping_remote(address):
     peer = next((device for device in devices if device.get('address', '').lower() == address), None)
     if (peer and peer.get('paired') is True and not peer.get('pairing') and not peer.get('blocked')
             and 'hid' not in peer.get('connectedProfiles', [])):
-        api('hid/connect', {'address': address}, service='com.webos.service.bluetooth2')
+        if 'gatt' in peer.get('connectedProfiles', []):
+            return
+        if policy is not None:
+            policy.clear()
+        api('gatt/connect', {'address': address}, service='com.webos.service.bluetooth2')
+        print('Remote 3 BLE reconnect requested', flush=True)
 
 
-def repair_receiver_attachment(address):
-    if not slot_identities_valid(address):
+class ReconnectPolicy:
+    def __init__(self):
+        self.due = 0
+        self.delay = 5
+
+    def update(self, address, policy, now):
+        if now < self.due:
+            return
+        try:
+            reconnect_sleeping_remote(address, policy)
+        except (OSError, ValueError, RuntimeError) as error:
+            print('Remote 3 reconnect failed: ' + str(error), flush=True)
+            self.due = now + self.delay
+            self.delay = min(60, self.delay * 2)
+        else:
+            self.delay = 5
+            self.due = now + 5
+
+
+def repair_receiver_attachment(address, policy=None):
+    if (not slot_identities_valid(address) or policy is None
+            or policy.handle is None or policy.disconnecting):
         return False
     state = api('power/getPowerState', {}, service='com.webos.service.tvpower')
     if state.get('state') != 'Active' or state.get('processing'):
@@ -339,9 +359,8 @@ def repair_receiver_attachment(address):
             and 'hid' in peer.get('connectedProfiles', [])):
         return False
     api('hid/disconnect', {'address': address}, service='com.webos.service.bluetooth2')
-    time.sleep(1)
-    api('hid/connect', {'address': address}, service='com.webos.service.bluetooth2')
-    print('Remote 3 receiver attachment refreshed', flush=True)
+    policy.disconnecting = True
+    print('Remote 3 attachment repair waiting for disconnect completion', flush=True)
     return True
 
 
@@ -351,7 +370,7 @@ def main():
     inputs = MotionInputs(address)
     receiver = ReceiverInputs()
     attachment = AttachmentPolicy()
-    next_reconnect = time.monotonic() + 5
+    reconnect = ReconnectPolicy()
     next_attachment_check = time.monotonic() + 1
     with open_controller() as controller:
         try:
@@ -372,19 +391,14 @@ def main():
                 controller.send(command)
                 print('Remote 3 requested {} ms link with latency {}'.format(
                     policy.desired[0] * 1.25, policy.desired[1]), flush=True)
-            if policy.handle is None and time.monotonic() >= next_reconnect:
-                try:
-                    reconnect_sleeping_remote(address)
-                except (OSError, ValueError, RuntimeError):
-                    pass
-                next_reconnect = time.monotonic() + 5
+            reconnect.update(address, policy, time.monotonic())
             now = time.monotonic()
             if policy.handle is not None and now >= next_attachment_check:
                 reported = inputs.last_report is not None and now - inputs.last_report < 3
                 attached = receiver_has_hidraw(address) or receiver.active(now)
                 if attachment.update(reported, attached, now):
                     try:
-                        repair_receiver_attachment(address)
+                        repair_receiver_attachment(address, policy)
                     except (OSError, ValueError, RuntimeError) as error:
                         print('Remote 3 attachment repair failed: ' + str(error), flush=True)
                 next_attachment_check = now + 1

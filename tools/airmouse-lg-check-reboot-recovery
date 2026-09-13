@@ -74,7 +74,8 @@ def main():
         raise RuntimeError('Remote 3 did not become ready after the TV receiver recovered')
 
     check = Path(__file__).with_name('airmouse-lg-check-key-route')
-    command = [sys.executable, str(check), '--tv', args.tv, '--remote', args.remote, '--motion']
+    command = [sys.executable, str(check), '--tv', args.tv, '--remote', args.remote,
+               '--remote3-address', secondary, '--motion']
     first = subprocess.run(command)
     if first.returncode:
         print('Initial activity exposed a missing receiver attachment; waiting for automatic refresh.',

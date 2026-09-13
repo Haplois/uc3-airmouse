@@ -73,6 +73,7 @@ restore the firmware service with the rollback command.
 - [Native UI design and protocol](docs/design/native-ui.md)
 - [Firmware mouse-button limitation](docs/design/mouse-button-protocol.md)
 - [Experimental sensor drivers](drivers/README.md)
+- [Public-release checks and private-data handling](docs/publication.md)
 
 Run local checks and builds with:
 

@@ -21,8 +21,8 @@ The deployed v5 receiver reduces Remote 3's shake threshold from about 105 to
 Remote 3's secondary slot. It retains the alternating-stroke requirement, cursor
 sensitivity, and original remote behavior. The TV connection helper
 uses a 10 ms interval and zero peripheral latency during pointing. It can briefly
-reconnect Remote 3 when first installed or after a lost receiver attachment,
-preserving the pairing. During rest it
+reconnect Remote 3 after a lost receiver attachment, preserving the pairing.
+It retains an existing connection when the helper starts. During rest it
 relaxes to 30 ms and latency 2; see [power saving](power-saving.md).
 
 The [receiver protocol reference](lg-protocol.md) contains the firmware evidence,
@@ -177,7 +177,7 @@ their existing behavior.
 Circle and hamburger use distinct Bluetooth commands handled only for the
 paired Remote 3 address. The TV helper launches `com.webos.app.quicksettings`
 and `com.palm.app.settings`, respectively. Verify these routes with
-`python3 tools/airmouse-lg-check-settings --tv root@10.0.240.2 --remote root@10.0.10.51`.
+`python3 tools/airmouse-lg-check-settings --tv root@lg-tv.example --remote root@remote3.example`.
 The check briefly stops and restores the pointer runtime, returns Home before
 each command, and checks TV lifecycle events. It leaves All Settings open.
 It does not check rendered pixels or physical button switches.
@@ -440,7 +440,7 @@ SSH. It does not modify Bluetooth settings or inject input:
 ```sh
 python3 tools/airmouse-lg-record --seconds 120 --output /tmp/magic.hci-monitor
 python3 tools/airmouse-lg-inspect --monitor /tmp/magic.hci-monitor
-python3 tools/airmouse-lg-inspect --host root@10.0.240.2
+python3 tools/airmouse-lg-inspect --host root@lg-tv.example
 ```
 
 For a registration capture, run `tools/airmouse-lg-record-input --seconds 120

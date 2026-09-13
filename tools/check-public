@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Check publishable files for private artifacts and identifying host details.
+
+This complements Gitleaks; it is not a credential scanner or a history scrubber.
+"""
+import ipaddress
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_SUFFIXES = {'.pem', '.key', '.pcap', '.pcapng', '.btsnoop', '.scd',
+                    '.tlv', '.sqlite', '.sqlite3', '.jsonl'}
+PRIVATE_NAMES = {'id_rsa', 'id_ed25519', 'core-api-key', 'credentials.json'}
+NETWORKS = tuple(ipaddress.ip_network(value) for value in
+                 ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+
+
+def findings(name, data):
+    path = Path(name)
+    if (path.suffix in PRIVATE_SUFFIXES or path.name in PRIVATE_NAMES
+            or path.name == '.env' or path.name.startswith('.env.') and path.name != '.env.example'
+            or path.parts[0] in ('private', 'backups', 'captures', 'dist')):
+        yield 'private artifact'
+    if b'\0' in data:
+        return
+    text = data.decode('utf-8', errors='replace')
+    for number, line in enumerate(text.splitlines(), 1):
+        if re.search(r'/(?:home|Users)/[^/\s]+/', line):
+            yield f'line {number}: personal workstation path'
+        if path.parts[0] in ('test', 'bluetooth') and 'test' in path.parts:
+            continue
+        for match in re.finditer(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])', line):
+            try:
+                address = ipaddress.ip_address(match.group())
+            except ValueError:
+                continue
+            if any(address in network for network in NETWORKS):
+                # Network definitions in this checker describe ranges, not devices.
+                if name == 'tools/check-public':
+                    continue
+                yield f'line {number}: private network address'
+
+
+def main():
+    names = subprocess.check_output(
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT
+    ).decode().split('\0')
+    failures = []
+    for name in sorted(set(names) - {''}):
+        path = ROOT / name
+        if path.is_symlink():
+            failures.append(f'{name}: review symlink before publication')
+        elif path.is_file():
+            failures.extend(f'{name}: {item}' for item in findings(name, path.read_bytes()))
+    if failures:
+        print('\n'.join(failures), file=sys.stderr)
+        return 1
+    print('Publication file check passed. Run Gitleaks separately for secrets and history.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

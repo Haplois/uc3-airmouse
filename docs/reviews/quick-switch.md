@@ -69,4 +69,4 @@ Later releases can take ownership again after reboot according to the [ownership
 setting](../../bluetooth/README.md).
 
 Test logs, timing captures, configuration checks, and the native render are
-archived at `/home/agent/.codex/archives/uc3-airmouse/quick-switch-20260908/`.
+archived at `<private-archive>/quick-switch-20260908/`.

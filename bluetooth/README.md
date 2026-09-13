@@ -11,8 +11,8 @@ tools/airmouse-bluetooth-build --arch arm64 --btstack /tmp/uc3-airmouse-referenc
 Use the archive path printed by the build command:
 
 ```sh
-tools/airmouse-bluetooth --host root@10.0.10.51 install --archive dist/airmouse-bluetooth-arm64-RELEASE.tar.gz
-tools/airmouse-bluetooth --host root@10.0.10.51 probe
+tools/airmouse-bluetooth --host root@remote3.example install --archive dist/airmouse-bluetooth-arm64-RELEASE.tar.gz
+tools/airmouse-bluetooth --host root@remote3.example probe
 ```
 
 Installation copies the daemon and licenses into a separate release directory
@@ -26,7 +26,7 @@ including when the probe fails.
 After a successful probe, start the owned backend:
 
 ```sh
-tools/airmouse-bluetooth --host root@10.0.10.51 takeover
+tools/airmouse-bluetooth --host root@remote3.example takeover
 ```
 
 Open **Air mouse → All devices** and select **Pair another computer**. Pair the
@@ -53,8 +53,8 @@ rollback.
 Restore stock Bluetooth with:
 
 ```sh
-tools/airmouse-bluetooth --host root@10.0.10.51 rollback
-tools/airmouse-bluetooth --host root@10.0.10.51 status
+tools/airmouse-bluetooth --host root@remote3.example rollback
+tools/airmouse-bluetooth --host root@remote3.example status
 ```
 
 Rollback stops the owned daemon, powers the controller off, restores the previous runtime masks and Node drop-in, and restores previous service activity. It keeps the custom installation and its bond store for later use. Installation backups and the installed-file record are under `/mnt/data/airmouse/bluetooth/install-backup`.

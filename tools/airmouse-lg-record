@@ -47,7 +47,7 @@ print('CAPTURE_COMPLETE: ' + str(count) + ' monitor records', file=sys.stderr, f
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='root@10.0.240.2')
+    parser.add_argument('--host', default='root@lg-tv.example')
     parser.add_argument('--seconds', type=int, default=120)
     parser.add_argument('--output', type=pathlib.Path)
     args = parser.parse_args()
